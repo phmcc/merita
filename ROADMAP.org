@@ -1,0 +1,92 @@
+#+TITLE: Merita Roadmap
+#+AUTHOR: Paul H. McClelland
+#+OPTIONS: toc:0 num:nil
+
+The following features are tentatively planned for future releases.
+
+* v0.5.0
+
+- [ ] Fine-tune metrics support
+- [ ] Add filter presets
+  - [ ] "pipeline" (submitted + in-prep) [default]
+  - [ ] "promotion" (everything)
+  - [ ] "biosketch" (only peer-reviewed, last 5 years, significant authorship)
+
+* v0.6.0
+
+- [ ] Altmetric Integration
+  - [ ] Fetch Altmetric Attention Score via the free Details Page API
+  - [ ] Social media mention counts, news coverage, policy document citations
+  - [ ] Store in ~altmetric_score~ and ~altmetric_details~ columns
+
+- [ ] Additional Package Registries
+  - [ ] MELPA download counts for Emacs packages
+  - [ ] npm download counts for JavaScript/TypeScript packages
+  - [ ] RubyGems download counts
+  - [ ] Bioconductor download counts for R/Bioconductor packages
+
+* v0.7.0
+
+- [ ] Author Truncation
+  - [ ] Strict AMA 11th edition formatting: list first 6 authors, then "et al."
+  - [ ] Configurable author truncation threshold for citations
+  - [ ] Accurate handling of author count for display vs. database
+
+- [ ] Journal Impact Factor Lookup
+  - [ ] Fetch current JIF from OpenAlex source metadata
+  - [ ] Auto-populate ~impact_factor~ during DOI import or metrics update
+  - [ ] Historical JIF at time of publication vs. current JIF distinction
+
+* v0.8.0
+
+- [ ] Collaboration Network
+  - [ ] Extract co-author relationships from the author string
+  - [ ] Compute collaboration frequency and identify recurring collaborators
+  - [ ] Display as an adjacency list or formatted report
+
+- [ ] ~tabula-view-mode~ Integration
+  - [ ] Deeper ~tabula.el~ integration beyond the existing schema bridge
+  - [ ] Browse/edit merita entries in ~tabula-view-mode~ with full filter/sort/mark
+  - [ ] Metrics columns visible and sortable in the tabulated list
+
+- [ ] Citation Alerts
+  - [ ] Compare current citation counts against previous values
+  - [ ] Report new citations since last update
+  - [ ] Identify entries with unusual citation velocity
+
+* v0.9.0
+
+- [ ] Multi-Format CV Templates
+  - [ ] Template selection per export, or per entry-type override
+  - [ ] HTML and Markdown CV export
+
+- [ ] Grant Reporting Integration
+  - [ ] Generate progress report publication lists filtered by grant period
+  - [ ] Format as required by NIH, NSF, or configurable agency templates
+  - [ ] Include citation metrics summaries for funded work
+
+- [ ] Promotion Packet Generator
+  - [ ] Combine publications, presentations, grants, and awards into a single document
+  - [ ] Teaching, mentorship, and service sections (manual or from tags)
+  - [ ] Configurable output: LaTeX, Org, or Markdown
+
+* Future
+
+- [ ] Syncing and Portability
+  - [ ] Database checkpoint and close for Syncthing/Dropbox workflows
+  - [ ] BibTeX or TSV export as build artifact alongside SQLite
+  - [ ] Path normalization for cross-machine portability
+
+- [ ] PubMed Integration
+  - [ ] Fetch metadata via NCBI E-utilities (PMID-based lookup)
+  - [ ] MeSH term auto-population
+  - [ ] PubMed Central full-text link resolution
+
+- [ ] Org-Mode Integration
+  - [ ] Export to org-mode structured headings with property drawers
+  - [ ] Org-capture templates for quick entry
+  - [ ] Org-agenda integration for tracking submission deadlines
+
+- [ ] Embark Actions
+  - [ ] Embark targets for entry candidates in ~completing-read~
+  - [ ] Actions: view, edit, delete, copy DOI, open URL, fetch metrics

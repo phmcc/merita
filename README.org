@@ -1,0 +1,309 @@
+#+TITLE: merita
+#+AUTHOR: Paul H. McClelland
+#+OPTIONS: toc:0 num:nil
+
+*A personal scholarly achievement database for Emacs.*
+
+~merita~ (Latin: "things earned") tracks a researcher's publications, presentations, grants, and awards in a queryable SQLite database within Emacs.  Rather than scattering career data across CVs, biosketches, departmental reports, and spreadsheets, ~merita~ consolidates it into a single authoritative record with structured metadata and multi-format export.
+
+* Design and Scope
+
+A curriculum vitae is a static document: it can list publications, but it cannot answer questions about them.  It does not know which papers were peer-reviewed, what the researcher's /h/-index is, how many times a given author appeared in the first-author position, or which entries belong in an NIH biosketch versus a departmental annual report.  That information lives in the researcher's head—or, more often, scattered across spreadsheets, reference managers, and overlapping drafts of the same CV.
+
+~merita~ replaces this arrangement with a queryable database.  Each entry carries structured metadata—authorship position, peer-review status, citation counts, journal impact factor, publication trajectory—so the record can be filtered, sorted, and exported programmatically.  This allows for Scopus-style statistics and context-dependent CV generation all in one place.  ~merita~ thus differs from standard reference managers such as Zotero, ~citar~, and ~org-ref~ in that it truly focuses on managing a researcher's own work, processing the data needed when writing a biosketch, updating a CV, preparing a promotion packet, or reporting to a department.
+
+Internally, ~merita~ uses Emacs 29.1's built-in ~sqlite.el~ as its storage backend, giving it the query power of a relational database with the portability of a single file.  BibTeX, LaTeX, CSV/TSV, and plain text are export targets, not the source of truth.  At present, supported export formats include LaTeX, BibTeX, RIS, CSV, and plain text, with AMA, APA, Chicago, IEEE, Vancouver, and NLM citation styles, with optional author-name bolding and status-aware formatting.
+
+* Features
+
+- *SQLite-backed storage* — 40+ fields covering all scholarly output types, from journal articles to grants and awards
+- *Browse mode* — sortable tabulated list with reverse-chronological ordering, inline export, and DOI/PMID browsing
+- *Entry view* — formatted citation preview, 80-character layout, chronological navigation, and single-entry export dispatcher
+- *DOI-based entry* — fetch metadata from the Crossref API (free, no key required)
+- *ORCID import* — populate the database from a public ORCID record, with automatic DOI deduplication
+- *Citation metrics* — pull citation counts, FWCI, influential citations, and open-access status from OpenAlex and Semantic Scholar
+- *Researcher statistics* — h-index, i10-index, mean FWCI, authorship breakdown, publications by year
+- *Citation formatters* — APA 7th, Vancouver/NLM, IEEE, Chicago (author-date), and plain text
+- *Default citation style* — configurable via ~merita-default-citation-style~; used by the export dispatcher and entry view
+- *LaTeX CV export* — Vancouver (medical) citation style with reverse numbering, status-aware formatting, and author name bolding
+- *BibTeX, TSV, CSV, and RIS export* — for interoperability with reference managers and version control
+- *BibTeX, CSV, and TSV import* — with automatic DOI deduplication
+- *Entry linking* — related entries across venues (abstract ↔ podium ↔ paper); link type taxonomy includes ~related~, ~software-paper~, ~erratum~, ~commentary~, ~derived~, ~supersedes~
+- *Author position tracking* — 9 positions (first, co-first, second, third, senior, co-senior, corresponding, middle, sole)
+- *Choice field completion* — constrained fields (~author_position~, ~status~, ~peer_reviewed~, ~grant_role~, ~pkg_registry~) use ~completing-read~ during editing
+- *Optional Tabula integration* — interactive browsing and editing via ~tabula~, with a provided ~merita-tabula.el~ bridge file
+
+Default keybindings are documented in [[file:KEYBINDINGS.org][KEYBINDINGS.org]].
+
+* Installation
+
+~merita~ is not yet available in any Emacs package repository.
+
+** With ~elpaca~ or ~straight~
+
+Install directly from the online repository:
+
+#+begin_src emacs-lisp
+(use-package merita
+  :ensure (:host codeberg :repo "phmcc/merita")
+  :custom
+  (merita-user-name "LastName AB")
+  (merita-default-citation-style 'vancouver)
+  (merita-orcid-id "0000-0000-0000-0000")
+  (merita-metrics-email "user@institution.edu"))
+#+end_src
+
+** Manual
+
+Clone the repository and add it to the load path:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/path/to/merita")
+(require 'merita)
+#+end_src
+
+* Quick Start
+
+** 1. Initialize the database
+
+#+begin_example
+M-x merita-init
+#+end_example
+
+This creates =~/.emacs.d/merita.db= (configurable via ~merita-database-file~).
+
+** 2. Populate the database
+
+The fastest approach for a researcher with an ORCID record:
+
+#+begin_example
+M-x merita-import-orcid
+#+end_example
+
+This fetches the public works list, identifies DOIs not yet in the database, and imports them via Crossref.  Alternatively, entries can be added individually or in bulk:
+
+#+begin_example
+M-x merita-add-from-doi RET 10.1234/example RET
+M-x merita-add-from-doi-batch
+M-x merita-import-bibtex
+#+end_example
+
+** 3. Fetch citation metrics
+
+#+begin_example
+M-x merita-metrics-update
+#+end_example
+
+Queries OpenAlex and Semantic Scholar for citation counts, FWCI, influential citations, and open-access status.  Results are written directly to the database.
+
+** 4. Browse and view statistics
+
+#+begin_example
+M-x merita-browse
+M-x merita-summary
+M-x merita-metrics-stats
+M-x merita-metrics-top-cited
+#+end_example
+
+~merita-browse~ opens a sortable tabulated list of all entries with columns for status, type, year, month, title, authors, journal, position, and citation count.  Entries are sorted in reverse chronological order with undated entries at the top.  From the list: ~RET~ views an entry, ~e~ exports a citation, ~E~ edits, ~b~ opens the DOI in a browser.
+
+** 5. Export
+
+Export a single entry from browse mode or entry view with ~e~ (prompts for format and citation style).  Export the entire database:
+
+#+begin_example
+M-x merita-export-latex RET publications.tex RET
+M-x merita-export-bibtex RET merita.bib RET
+#+end_example
+
+* Entry Types
+
+| Type             | BibTeX equivalent | Description              |
+|------------------+-------------------+--------------------------|
+| ~journal-article~  | ~article~           | Peer-reviewed paper      |
+| ~review-article~   | ~article~           | Review/survey paper      |
+| ~editorial~        | ~article~           | Editorial or commentary  |
+| ~letter~           | ~article~           | Letter to the editor     |
+| ~case-report~      | ~article~           | Clinical case report     |
+| ~book~             | ~book~              | Authored book            |
+| ~book-chapter~     | ~incollection~      | Chapter in edited volume |
+| ~conference-paper~ | ~inproceedings~     | Published proceedings    |
+| ~preprint~         | ~unpublished~       | arXiv, bioRxiv, etc.     |
+| ~technical-report~ | ~techreport~        | Technical report         |
+| ~thesis-doctoral~  | ~phdthesis~         | PhD dissertation         |
+| ~thesis-masters~   | ~mastersthesis~     | Master's thesis          |
+| ~podium~           | ~misc~              | Podium presentation      |
+| ~poster~           | ~misc~              | Poster presentation      |
+| ~invited-talk~     | ~misc~              | Invited lecture          |
+| ~keynote~          | ~misc~              | Keynote address          |
+| ~grant~            | ~misc~              | Funded grant             |
+| ~award~            | ~misc~              | Award or honor           |
+
+* Citation Metrics
+
+The metrics module (~merita-metrics.el~) fetches data from two free APIs:
+
+** OpenAlex (primary)
+
+Batched lookups (50 DOIs per request).  Provides citation count, FWCI, open-access status, and citations-by-year.
+
+** Semantic Scholar (secondary)
+
+Batched lookups (500 DOIs per POST).  Provides citation count, influential citation count, and paper ID.
+
+** Software Metrics
+
+For entries with ~type~ of ~software~ or ~dataset~, ~merita-metrics-update~ also fetches GitHub repository metrics (stars, forks, watchers, language, license) and package download counts from CRAN or PyPI.
+
+| Variable                    | Default | Description                            |
+|-----------------------------+---------+----------------------------------------|
+| ~merita-metrics-email~        | ~nil~     | Email for OpenAlex polite pool         |
+| ~merita-metrics-openalex-key~ | ~nil~     | OpenAlex API key (optional; free)      |
+| ~merita-metrics-s2-key~       | ~nil~     | Semantic Scholar API key (optional)    |
+| ~merita-metrics-stale-days~   | ~7~       | Days before re-fetching                |
+| ~merita-metrics-source~       | ~all~     | API sources (~all~, ~openalex~, ~semanticscholar~) |
+
+* ORCID Import
+
+~merita-import-orcid~ uses the unauthenticated =pub.orcid.org/v3.0= endpoint (no OAuth required).  It fetches the public works list, partitions entries into new/existing/no-DOI categories, and imports new works via Crossref.
+
+~merita-orcid-diff~ provides a read-only comparison without importing anything.
+
+| Variable                   | Default | Description                            |
+|----------------------------+---------+----------------------------------------|
+| ~merita-orcid-id~            | ~nil~     | ORCID iD (0000-0000-0000-0000)         |
+| ~merita-orcid-auto-position~ | ~nil~     | Default author position (skip prompts) |
+
+* Citation Formatters
+
+Six citation style formatters are available, each accepting an entry alist and returning a formatted string.
+
+| Formatter               | Style                              |
+|-------------------------+------------------------------------|
+| ~merita-format-vancouver~ | Vancouver/AMA (LaTeX-aware)        |
+| ~merita-format-apa~       | APA 7th edition                    |
+| ~merita-format-nlm~       | NLM (National Library of Medicine) |
+| ~merita-format-ieee~      | IEEE                               |
+| ~merita-format-chicago~   | Chicago author-date (17th edition) |
+| ~merita-format-plain~     | Minimal plain text                 |
+
+The default citation style is set via ~merita-default-citation-style~ and is used by the export dispatcher and the entry view citation preview.
+
+* LaTeX Export
+
+The LaTeX exporter generates a =.tex= file suitable for =\input{}= in a CV document.  Entry types are grouped into sections with configurable order and titles.
+
+** Formatting conventions
+
+- *Vancouver (medical) citation style* by default, following AMA 11th edition
+- *Author name bolding* — automatically bolds ~merita-user-name~ and variants
+- *Status-aware formatting* — in-press and submitted entries omit volume/issue/pages per convention
+- *Reverse chronological numbering* — highest number = most recent (configurable)
+- *Presentation linking* — abstracts with linked presentations appear in both the "Published Abstracts" and "Presentations" sections
+
+** Customization
+
+| Variable                       | Default                   | Description                      |
+|--------------------------------+---------------------------+----------------------------------|
+| ~merita-latex-formatter~         | ~merita-format-vancouver~   | Citation formatting function     |
+| ~merita-latex-bold-author~       | ~t~                         | Bold user's name in output       |
+| ~merita-latex-enumerate-style~   | ~t~                         | Numbered lists (~nil~ for bullets) |
+| ~merita-latex-reverse-numbering~ | ~t~                         | Highest number = most recent     |
+| ~merita-latex-section-order~     | (list)                    | Order of entry type sections     |
+| ~merita-latex-section-titles~    | (alist)                   | Display names for each type      |
+| ~merita-latex-preamble~          | (string)                  | LaTeX preamble template          |
+
+* Import
+
+| Command                          | Description                              |
+|----------------------------------+------------------------------------------|
+| ~merita-import-orcid~              | Import from a public ORCID record        |
+| ~merita-orcid-diff~                | Show ORCID works not yet in the database |
+| ~merita-add-from-doi~              | Add a single entry by DOI (Crossref)     |
+| ~merita-add-from-doi-batch~        | Add multiple entries by DOI              |
+| ~merita-import-bibtex~             | Import from a =.bib= file                 |
+| ~merita-import-csv~                | Import from a CSV file                   |
+| ~merita-import-tsv~                | Import from a TSV file                   |
+| ~merita-annotate-author-positions~ | Walk through entries missing positions   |
+
+All importers skip duplicate DOIs automatically.  After BibTeX or ORCID import, ~merita-annotate-author-positions~ walks through unannotated entries.
+
+* Export
+
+| Command                      | Description                             |
+|------------------------------+-----------------------------------------|
+| ~merita-export-entry~          | Single-entry export (format + style)    |
+| ~merita-export-latex~          | LaTeX CV sections (=.tex=)              |
+| ~merita-export-text~           | Plain text with configurable formatter  |
+| ~merita-export-text-apa~       | Plain text in APA 7th edition           |
+| ~merita-export-text-vancouver~ | Plain text in Vancouver/NLM style       |
+| ~merita-export-text-ieee~      | Plain text in IEEE style                |
+| ~merita-export-text-chicago~   | Plain text in Chicago author-date style |
+| ~merita-export-bibtex~         | BibTeX (=.bib=)                         |
+| ~merita-export-ris~            | RIS (=.ris=)                            |
+| ~merita-export-tsv~            | Tab-separated values (=.tsv=)           |
+| ~merita-export-csv~            | Comma-separated values (=.csv=)         |
+
+~merita-export-entry~ is the single-entry dispatcher, available as ~e~ in both browse and entry view.  It prompts for format (plain text, LaTeX, BibTeX, RIS), then for citation style when applicable.
+
+* Customization
+
+| Variable                        | Default               | Description                                  |
+|---------------------------------+-----------------------+----------------------------------------------|
+| ~merita-database-file~            | =~/.emacs.d/merita.db=  | Path to SQLite database                      |
+| ~merita-user-name~                | ~nil~                   | Author name as it appears in publications    |
+| ~merita-user-name-variants~       | ~nil~                   | Alternative name forms                       |
+| ~merita-default-citation-style~   | ~vancouver~             | Default citation style for export/display    |
+| ~merita-crossref-mailto~          | ~nil~                   | Email for Crossref polite pool               |
+| ~merita-peer-reviewed-types~      | (list)                | Types counted as peer-reviewed               |
+| ~merita-default-export-directory~ | =~/=                    | Default export path                          |
+| ~merita-entry-display~            | ~buffer~                | Entry view display: ~buffer~ or ~side~       |
+| ~merita-summary-sort-by~          | ~all~                   | Summary dashboard sort: ~all~ or ~pr~        |
+| ~merita-metrics-email~            | ~nil~                   | Email for OpenAlex polite pool               |
+| ~merita-metrics-openalex-key~     | ~nil~                   | OpenAlex API key (optional)                  |
+| ~merita-metrics-s2-key~           | ~nil~                   | Semantic Scholar API key (optional)          |
+| ~merita-metrics-stale-days~       | ~7~                     | Days before re-fetching metrics              |
+| ~merita-metrics-source~           | ~all~                   | API sources (~all~, ~openalex~, ~semanticscholar~) |
+| ~merita-orcid-id~                 | ~nil~                   | ORCID iD (0000-0000-0000-0000)               |
+| ~merita-orcid-auto-position~      | ~nil~                   | Default author position for ORCID import     |
+| ~merita-text-formatter~           | ~merita-format-apa~     | Default plain text citation style            |
+| ~merita-text-numbered~            | ~t~                     | Number entries in plain text export          |
+
+* Technical Details
+
+** File structure
+
+| File                | Description                                                                   |
+|---------------------+-------------------------------------------------------------------------------|
+| ~merita.el~           | Core: schema, CRUD, entry, browse, search, statistics, ORCID import, citation formatters, all export formats |
+| ~merita-metrics.el~   | Citation metrics: OpenAlex, Semantic Scholar, GitHub, CRAN/PyPI               |
+| ~merita-tabula.el~    | Optional bridge: registers merita database with ~tabula~ for interactive editing |
+
+** Requirements
+
+- Emacs 29.1+ (built-in SQLite via ~sqlite.el~, ~url.el~, ~json.el~)
+- Internet access (for DOI import and metrics fetching)
+
+** Database schema
+
+The main =data= table has 40+ columns covering bibliographic fields, identifiers (DOI, PMID, PMCID, arXiv), merita-specific fields (author position, citation metrics, FWCI, OA status), content (abstract, keywords, MeSH), funding, awards, and timestamps.  A separate =presentations= table links entries to multiple presentation venues via foreign key.  A =related_entries= table stores bidirectional links between entries with typed relationships.  A =meta= table stores schema version and cached researcher statistics.
+
+The metrics module auto-migrates the schema on first run, adding columns for OpenAlex and Semantic Scholar data without requiring manual intervention.
+
+** API rate limits
+
+| Source            | Free tier                          | With key                    |
+|-------------------+------------------------------------+-----------------------------|
+| Crossref          | Unlimited (polite pool with email) | N/A                         |
+| OpenAlex          | 100 credits/day                    | 100,000 credits/day (free)  |
+| Semantic Scholar  | 1,000 req/s (shared)               | Higher (request key)        |
+
+For a typical academic publication list (30–80 DOIs), a full metrics update completes in 2–5 seconds.
+
+* Contributing
+
+Contributions are welcome.  Please open an issue to discuss major changes, follow existing code style, and update documentation as appropriate.
+
+* License
+
+GPL-3.0-or-later

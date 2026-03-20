@@ -1,0 +1,3894 @@
+;;; merita.el --- Academic achievement database for Emacs -*- lexical-binding: t; -*-
+
+;; Author: Paul H. McClelland
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 Paul H. McClelland
+
+;; Version: 0.4.0
+;; Package-Requires: ((emacs "29.1"))
+;; Keywords: bib, data, convenience
+;; URL: https://codeberg.org/phmcc/merita
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+;;
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+;;
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; Merita (Latin: "things earned") is a personal scholarly achievement
+;; database.  It manages publications, presentations, grants,
+;; and awards in a queryable SQLite database with multi-format export.
+;;
+;; Merita is NOT a reference manager.  Tools like Zotero, citar, and
+;; org-ref manage other people's work for citation in manuscripts.
+;; Merita manages an individual researcher's OWN work: tracking career-specific metadata no
+;; citation format captures — author position, citation metrics,
+;; impact factors, and publication trajectories.
+;;
+;; Features:
+;; - SQLite database with 40+ fields covering all scholarly output
+;; - DOI-based entry via the Crossref API (free, no key required)
+;; - ORCID import for bulk population from a public ORCID record
+;; - Citation metrics from OpenAlex and Semantic Scholar
+;; - BibTeX, CSV, and TSV import
+;; - LaTeX CV export with Vancouver (medical) citation style
+;; - Plain text export in APA, IEEE, Chicago, NLM, and Vancouver styles
+;; - BibTeX, TSV, CSV, and RIS export for interoperability
+;; - Abstract/presentation linking (one work, two CV sections)
+;; - Career statistics: h-index, i10-index, FWCI, authorship breakdown
+;; - Optional Tabula integration for interactive browsing/editing
+;;
+;; See the README for full documentation and example configurations.
+
+;;; Code:
+
+;;; * 0. Prerequisites
+
+(require 'sqlite)
+(require 'cl-lib)
+(require 'json)
+(require 'url)
+
+;; Forward declarations (defined later in this file)
+(defvar merita--latex-context)
+(defvar merita-text-formatter)
+(defvar merita--style-formatter-map)
+
+;;; * 1. Foundation
+
+;;; ** 1.1. Customization
+
+(defgroup merita nil
+  "Academic achievement database."
+  :group 'applications
+  :prefix "merita-")
+
+(defcustom merita-database-file "~/.emacs.d/merita.db"
+  "Path to the Merita SQLite database file."
+  :type 'file
+  :group 'merita)
+
+(defcustom merita-user-name nil
+  "Author name as it appears in publication author lists.
+Used for bolding in LaTeX export and statistics.
+Set to nil to disable author name bolding."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'merita)
+
+(defcustom merita-user-name-variants nil
+  "Alternative forms of the author's name (maiden name, abbreviations, etc.)."
+  :type '(repeat string)
+  :group 'merita)
+
+(defcustom merita-default-export-directory "~/"
+  "Default directory for export files."
+  :type 'directory
+  :group 'merita)
+
+(defcustom merita-latex-formatter #'merita-format-vancouver
+  "Function to format a single entry for LaTeX output.
+Called with an entry alist; should return a LaTeX string."
+  :type 'function
+  :group 'merita)
+
+(defcustom merita-default-citation-style 'vancouver
+  "Default citation style for export and display.
+Used by the export dispatcher and the entry view buffer.
+Valid values: vancouver, apa, ieee, chicago, nlm, plain."
+  :type '(choice (const :tag "Vancouver/AMA" vancouver)
+                 (const :tag "APA 7th edition" apa)
+                 (const :tag "IEEE" ieee)
+                 (const :tag "Chicago author-date" chicago)
+                 (const :tag "NLM" nlm)
+                 (const :tag "Plain (minimal)" plain))
+  :group 'merita)
+
+(defcustom merita-latex-bold-author t
+  "If non-nil, bold the user's name in LaTeX export."
+  :type 'boolean
+  :group 'merita)
+
+(defcustom merita-crossref-mailto nil
+  "Email for Crossref polite API access.
+Optional but recommended for faster response times."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'merita)
+
+(defcustom merita-summary-sort-by 'all
+  "Column used to rank sections in `merita-summary'.
+When `pr', sections are sorted by peer-reviewed count.
+When `all', sections are sorted by total count."
+  :type '(choice (const :tag "Peer-reviewed" pr)
+                 (const :tag "All entries" all))
+  :group 'merita)
+
+(defcustom merita-entry-display 'buffer
+  "How to display the entry view buffer.
+When `buffer', replaces the current window.
+When `side', opens in a right-side window."
+  :type '(choice (const :tag "Full buffer" buffer)
+                 (const :tag "Side window" side))
+  :group 'merita)
+
+;;; ** 1.2. Command Map
+
+;;;###autoload
+(defvar merita-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "i") #'merita-init)
+    (define-key map (kbd "a") #'merita-add)
+    (define-key map (kbd "d") #'merita-add-from-doi)
+    (define-key map (kbd "f") #'merita-find)
+    (define-key map (kbd "s") #'merita-search)
+    (define-key map (kbd "l") #'merita-browse)
+    (define-key map (kbd "e") #'merita-edit)
+    (define-key map (kbd "D") #'merita-delete)
+    (define-key map (kbd "x") #'merita-export-latex)
+    (define-key map (kbd "b") #'merita-export-bibtex)
+    (define-key map (kbd "t") #'merita-export-tsv)
+    (define-key map (kbd "r") #'merita-export-ris)
+    (define-key map (kbd "c") #'merita-export-csv)
+    (define-key map (kbd "o") #'merita-import-orcid)
+    (define-key map (kbd "p") #'merita-summary)
+    (define-key map (kbd "L") #'merita-link-entries)
+    (define-key map (kbd "U") #'merita-unlink-entries)
+    (define-key map (kbd "R") #'merita-list-related)
+    (define-key map (kbd "q") #'merita-close)
+    map)
+  "Keymap for Merita commands.
+Bind this to a prefix key, e.g.:
+  (global-set-key (kbd \"C-c v\") merita-command-map)")
+
+;;; ** 1.3. Entry Types
+
+(defconst merita-entry-types
+  '(journal-article review-article editorial letter case-report
+    book book-chapter conference-paper preprint technical-report
+    thesis-doctoral thesis-masters
+    podium poster invited-talk keynote workshop
+    abstract patent grant award dataset software media other)
+  "Valid entry types for scholarly output.")
+
+(defconst merita-entry-type-bibtex-map
+  '((journal-article . "article")
+    (review-article  . "article")
+    (editorial       . "article")
+    (letter          . "article")
+    (case-report     . "article")
+    (book            . "book")
+    (book-chapter    . "incollection")
+    (conference-paper . "inproceedings")
+    (preprint        . "unpublished")
+    (technical-report . "techreport")
+    (thesis-doctoral . "phdthesis")
+    (thesis-masters  . "mastersthesis")
+    (podium          . "misc")
+    (poster          . "misc")
+    (invited-talk    . "misc")
+    (keynote         . "misc")
+    (workshop        . "misc")
+    (abstract        . "misc")
+    (patent          . "misc")
+    (grant           . "misc")
+    (award           . "misc")
+    (dataset         . "misc")
+    (software        . "misc")
+    (media           . "misc")
+    (other           . "misc"))
+  "Mapping from Merita entry types to BibTeX entry types.")
+
+(defconst merita-author-positions
+  '(first co-first second third senior co-senior corresponding middle sole)
+  "Valid author position values, ordered by significance.")
+
+(defconst merita-status-values
+  '(published in-press accepted revision review submitted
+    preparation retracted)
+  "Valid publication status values.")
+
+(defcustom merita-peer-reviewed-types
+  '(journal-article review-article book book-chapter conference-paper)
+  "Entry types counted as peer-reviewed for statistics.
+Follows NIH biosketch conventions.  The summary dashboard shows
+both peer-reviewed and total counts."
+  :type '(repeat symbol)
+  :group 'merita)
+
+;;; * 2. Database
+
+;;; ** 2.1. Schema
+
+(defconst merita--schema-version 1
+  "Current database schema version.")
+
+(defconst merita--create-table-sql
+  "CREATE TABLE IF NOT EXISTS data (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+  -- Core bibliographic fields
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  authors TEXT,
+  year INTEGER,
+  month INTEGER,
+  day INTEGER,
+
+  -- Journal fields
+  journal TEXT,
+  journal_abbrev TEXT,
+  volume TEXT,
+  issue TEXT,
+  pages TEXT,
+  eid TEXT,
+
+  -- Book fields
+  book_title TEXT,
+  publisher TEXT,
+  edition TEXT,
+  editors TEXT,
+  series TEXT,
+  isbn TEXT,
+
+  -- Conference/presentation fields (primary venue)
+  conference TEXT,
+  conference_location TEXT,
+  conference_date TEXT,
+  organization TEXT,
+
+  -- Thesis fields
+  school TEXT,
+
+  -- Identifiers
+  doi TEXT UNIQUE,
+  pmid TEXT,
+  pmcid TEXT,
+  arxiv_id TEXT,
+  url TEXT,
+
+  -- Merita-specific fields
+  author_position TEXT,
+  author_count INTEGER,
+  impact_factor REAL,
+  citations INTEGER DEFAULT 0,
+  altmetric INTEGER,
+  status TEXT DEFAULT 'published',
+  peer_reviewed INTEGER DEFAULT 1,
+
+  -- Content
+  abstract TEXT,
+  keywords TEXT,
+  mesh_terms TEXT,
+
+  -- Grant/funding
+  funding TEXT,
+  grant_role TEXT,
+  grant_amount REAL,
+  grant_period TEXT,
+
+  -- Awards
+  awards TEXT,
+  award_body TEXT,
+
+  -- Notes and metadata
+  notes TEXT,
+  tags TEXT,
+  bibtex_key TEXT,
+  bibtex_type TEXT,
+
+  -- Software/dataset fields
+  repo_url TEXT,
+  repo_language TEXT,
+  pkg_registry TEXT,
+  pkg_name TEXT,
+  pkg_version TEXT,
+
+  -- Linkage (denormalized count, updated by merita--refresh-link-count)
+  links INTEGER DEFAULT 0,
+
+  -- Timestamps
+  date_added TEXT DEFAULT (datetime('now')),
+  date_modified TEXT DEFAULT (datetime('now'))
+)"
+  "SQL to create the main data table.")
+
+(defconst merita--create-presentations-table-sql
+  "CREATE TABLE IF NOT EXISTS presentations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL,
+  conference TEXT NOT NULL,
+  location TEXT,
+  date TEXT,
+  presentation_type TEXT,
+  organization TEXT,
+  notes TEXT,
+  FOREIGN KEY (entry_id) REFERENCES data(id) ON DELETE CASCADE
+)"
+  "SQL to create the presentations table.")
+
+(defconst merita--create-related-table-sql
+  "CREATE TABLE IF NOT EXISTS related_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id INTEGER NOT NULL,
+  related_id INTEGER NOT NULL,
+  relation_type TEXT NOT NULL,
+  notes TEXT,
+  FOREIGN KEY (entry_id) REFERENCES data(id) ON DELETE CASCADE,
+  FOREIGN KEY (related_id) REFERENCES data(id) ON DELETE CASCADE,
+  UNIQUE(entry_id, related_id, relation_type)
+)"
+  "SQL to create the related entries linkage table.
+Links are stored symmetrically (both directions) so queries from
+either side find the relationship.
+Relation types:
+  software-paper  — software and its describing publication
+  related         — same work across venues (abstract ↔ podium ↔ paper)
+  erratum         — correction and original
+  commentary      — editorial/letter and original article
+  derived         — dataset/analysis derived from another work
+  supersedes      — newer version supersedes older")
+
+(defconst merita-relation-types
+  '("software-paper" "related" "erratum" "commentary" "derived" "supersedes")
+  "Valid relation types for linked entries.")
+
+(defconst merita--create-meta-table-sql
+  "CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+)"
+  "SQL to create the metadata table.")
+
+(defconst merita--create-indexes-sql
+  '("CREATE INDEX IF NOT EXISTS idx_type ON data(type)"
+    "CREATE INDEX IF NOT EXISTS idx_year ON data(year)"
+    "CREATE INDEX IF NOT EXISTS idx_author_position ON data(author_position)"
+    "CREATE INDEX IF NOT EXISTS idx_status ON data(status)"
+    "CREATE INDEX IF NOT EXISTS idx_journal ON data(journal)"
+    "CREATE INDEX IF NOT EXISTS idx_doi ON data(doi)"
+    "CREATE INDEX IF NOT EXISTS idx_bibtex_key ON data(bibtex_key)"
+    "CREATE INDEX IF NOT EXISTS idx_presentations_entry ON presentations(entry_id)"
+    "CREATE INDEX IF NOT EXISTS idx_related_entry ON related_entries(entry_id)"
+    "CREATE INDEX IF NOT EXISTS idx_related_related ON related_entries(related_id)")
+  "SQL to create indexes on commonly queried columns.")
+
+;;; ** 2.2. Connection
+
+(defvar merita--db nil
+  "Active SQLite database connection.")
+
+(defun merita--db-file ()
+  "Return the expanded path to the database file."
+  (expand-file-name merita-database-file))
+
+(defun merita--ensure-db ()
+  "Ensure the database is open and initialized.  Return the connection."
+  (unless (and merita--db (sqlitep merita--db))
+    (merita-init))
+  merita--db)
+
+;;;###autoload
+(defun merita-init ()
+  "Initialize the Merita database.
+Creates the database file and tables if they don't exist.
+If a connection is already open to the same database, reuses it."
+  (interactive)
+  (let ((db-file (merita--db-file)))
+    (if (and merita--db (sqlitep merita--db)
+             (equal (expand-file-name db-file)
+                    (expand-file-name merita-database-file)))
+        (message "Merita database already open: %s" db-file)
+      ;; Close stale connection to a different file, if any
+      (when (and merita--db (sqlitep merita--db))
+        (sqlite-close merita--db)
+        (setq merita--db nil))
+      (let ((dir (file-name-directory db-file)))
+        (unless (file-exists-p dir)
+          (make-directory dir t)))
+      (setq merita--db (sqlite-open db-file))
+      (sqlite-execute merita--db "PRAGMA journal_mode=WAL")
+      (sqlite-execute merita--db "PRAGMA foreign_keys=ON")
+      (sqlite-execute merita--db merita--create-table-sql)
+      (sqlite-execute merita--db merita--create-meta-table-sql)
+      (sqlite-execute merita--db merita--create-presentations-table-sql)
+      (sqlite-execute merita--db merita--create-related-table-sql)
+      ;; Migrations (must run before indexes for column renames)
+      (condition-case nil
+          (sqlite-execute merita--db
+            "ALTER TABLE data ADD COLUMN links INTEGER DEFAULT 0")
+        (error nil))
+      (condition-case nil
+          (sqlite-execute merita--db
+            "ALTER TABLE data ADD COLUMN day INTEGER")
+        (error nil))
+      (condition-case nil
+          (sqlite-execute merita--db
+            "ALTER TABLE data RENAME COLUMN entry_type TO type")
+        (error nil))
+      (condition-case nil
+          (sqlite-execute merita--db
+            "DROP INDEX IF EXISTS idx_entry_type")
+        (error nil))
+      ;; Indexes (after migrations so column names are current)
+      (dolist (sql merita--create-indexes-sql)
+        (sqlite-execute merita--db sql))
+      (sqlite-execute merita--db
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)"
+        (list (number-to-string merita--schema-version)))
+      (message "Merita database initialized: %s" db-file))))
+
+;;;###autoload
+(defun merita-close ()
+  "Close the Merita database connection.
+Forces a WAL checkpoint before closing to ensure all writes are
+flushed to the main database file."
+  (interactive)
+  (when (and merita--db (sqlitep merita--db))
+    (condition-case nil
+        (sqlite-execute merita--db "PRAGMA wal_checkpoint(TRUNCATE)")
+      (error nil))
+    (sqlite-close merita--db)
+    (setq merita--db nil)
+    (message "Merita database closed.")))
+
+;;; ** 2.3. Core CRUD
+
+(defun merita--insert (alist)
+  "Insert an entry from ALIST.  Return the new row ID."
+  (let* ((db (merita--ensure-db))
+         (fields (mapcar #'car alist))
+         (values (mapcar #'cdr alist))
+         (columns (mapconcat (lambda (f) (symbol-name f)) fields ", "))
+         (placeholders (mapconcat (lambda (_) "?") fields ", "))
+         (sql (format "INSERT INTO data (%s) VALUES (%s)"
+                      columns placeholders)))
+    (sqlite-execute db sql values)
+    (caar (sqlite-select db "SELECT last_insert_rowid()"))))
+
+(defun merita--update (id alist)
+  "Update entry ID with fields from ALIST."
+  (let* ((db (merita--ensure-db))
+         (set-clause (mapconcat
+                      (lambda (pair)
+                        (format "%s = ?" (symbol-name (car pair))))
+                      alist ", "))
+         (values (append (mapcar #'cdr alist) (list id)))
+         (sql (format "UPDATE data SET %s, date_modified = datetime('now') WHERE id = ?"
+                      set-clause)))
+    (sqlite-execute db sql values)))
+
+(defun merita--delete (id)
+  "Delete entry with ID and all associated relations."
+  (let ((db (merita--ensure-db)))
+    (merita--delete-relations-for-entry id)
+    (sqlite-execute db "DELETE FROM data WHERE id = ?" (list id))))
+
+(defun merita--get (id)
+  "Get entry with ID as an alist, or nil."
+  (let* ((db (merita--ensure-db))
+         (rows (sqlite-select db "SELECT * FROM data WHERE id = ?"
+                              (list id) 'full)))
+    (when (and rows (> (length rows) 1))
+      (let ((columns (mapcar #'intern (car rows)))
+            (values (cadr rows)))
+        (cl-mapcar #'cons columns values)))))
+
+(defun merita--get-by-doi (doi)
+  "Get entry with DOI as an alist, or nil."
+  (let* ((db (merita--ensure-db))
+         (rows (sqlite-select db "SELECT * FROM data WHERE doi = ?"
+                              (list doi) 'full)))
+    (when (and rows (> (length rows) 1))
+      (let ((columns (mapcar #'intern (car rows)))
+            (values (cadr rows)))
+        (cl-mapcar #'cons columns values)))))
+
+(defun merita--query (sql &optional params)
+  "Execute SQL with PARAMS, return list of alists."
+  (let* ((db (merita--ensure-db))
+         (rows (sqlite-select db sql params 'full)))
+    (when (and rows (> (length rows) 1))
+      (let ((columns (mapcar #'intern (car rows))))
+        (mapcar (lambda (row) (cl-mapcar #'cons columns row))
+                (cdr rows))))))
+
+(defun merita--count (&optional where params)
+  "Count entries, optionally filtered by WHERE clause and PARAMS."
+  (let* ((db (merita--ensure-db))
+         (sql (if where
+                  (format "SELECT COUNT(*) FROM data WHERE %s" where)
+                "SELECT COUNT(*) FROM data")))
+    (caar (sqlite-select db sql params))))
+
+;;; ** 2.4. Presentation Management
+
+(defun merita--insert-presentation (entry-id alist)
+  "Insert a presentation record for ENTRY-ID from ALIST.
+Returns the new presentation row ID."
+  (let* ((db (merita--ensure-db))
+         (full-alist (cons (cons 'entry_id entry-id) alist))
+         (fields (mapcar #'car full-alist))
+         (values (mapcar #'cdr full-alist))
+         (columns (mapconcat (lambda (f) (symbol-name f)) fields ", "))
+         (placeholders (mapconcat (lambda (_) "?") fields ", "))
+         (sql (format "INSERT INTO presentations (%s) VALUES (%s)"
+                      columns placeholders)))
+    (sqlite-execute db sql values)
+    (caar (sqlite-select db "SELECT last_insert_rowid()"))))
+
+(defun merita--get-presentations (entry-id)
+  "Get all presentations for ENTRY-ID as a list of alists."
+  (let* ((db (merita--ensure-db))
+         (rows (sqlite-select db
+                 "SELECT * FROM presentations WHERE entry_id = ?
+                  ORDER BY date ASC"
+                 (list entry-id) 'full)))
+    (when (and rows (> (length rows) 1))
+      (let ((columns (mapcar #'intern (car rows))))
+        (mapcar (lambda (row) (cl-mapcar #'cons columns row))
+                (cdr rows))))))
+
+(defun merita--delete-presentation (presentation-id)
+  "Delete presentation with PRESENTATION-ID."
+  (let ((db (merita--ensure-db)))
+    (sqlite-execute db "DELETE FROM presentations WHERE id = ?"
+                    (list presentation-id))))
+
+;;;###autoload
+(defun merita-add-presentation (entry-id)
+  "Add a presentation venue for ENTRY-ID interactively."
+  (interactive
+   (list (merita--read-entry-id "Add presentation to entry: ")))
+  (let ((entry (merita--get entry-id)))
+    (unless entry
+      (user-error "Entry %d not found" entry-id))
+    (message "Adding presentation for: %s"
+             (merita--truncate (alist-get 'title entry) 60))
+    (let* ((conference (merita--read-field "Conference/event" nil nil t))
+           (location (merita--read-field "Location (city, country)"))
+           (date (merita--read-field "Date"))
+           (pres-type (completing-read "Presentation type: "
+                                       '("podium" "poster" "invited" "keynote"
+                                         "workshop" "panel")
+                                       nil t))
+           (org (merita--read-field "Sponsoring organization"))
+           (notes (merita--read-field "Notes"))
+           (alist (list (cons 'conference conference))))
+      (when location (push (cons 'location location) alist))
+      (when date (push (cons 'date date) alist))
+      (when pres-type (push (cons 'presentation_type pres-type) alist))
+      (when org (push (cons 'organization org) alist))
+      (when notes (push (cons 'notes notes) alist))
+      (let ((id (merita--insert-presentation entry-id alist)))
+        (message "Added presentation #%d at %s" id conference)
+        id))))
+
+(defvar merita-presentations-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "d") #'merita-presentations-delete)
+    (define-key map (kbd "a") #'merita-presentations-add)
+    (define-key map (kbd "g") #'merita-presentations-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `merita-presentations-mode'.")
+
+(define-derived-mode merita-presentations-mode special-mode "Merita Pres"
+  "Mode for viewing presentations of a Merita entry.
+\\{merita-presentations-mode-map}")
+
+(defvar-local merita--presentations-entry-id nil
+  "Entry ID for the current presentations buffer.")
+
+;;;###autoload
+(defun merita-list-presentations (entry-id)
+  "List all presentations for ENTRY-ID."
+  (interactive
+   (list (merita--read-entry-id "List presentations for: ")))
+  (let* ((entry (merita--get entry-id))
+         (presentations (merita--get-presentations entry-id))
+         (primary-conf (alist-get 'conference entry)))
+    (if (and (null presentations) (null primary-conf))
+        (message "No presentations recorded for this entry.")
+      (let ((buf (get-buffer-create "*merita-presentations*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (propertize
+                     (format "Presentations for: %s"
+                             (merita--truncate
+                              (or (alist-get 'title entry) "Untitled") 60))
+                     'face '(:weight bold)))
+            (insert "\n" (make-string 50 ?─) "\n\n")
+            (when primary-conf
+              (insert (format "  [primary] %s" primary-conf))
+              (let ((loc (alist-get 'conference_location entry))
+                    (date (alist-get 'conference_date entry)))
+                (when loc (insert (format ", %s" loc)))
+                (when date (insert (format " (%s)" date))))
+              (insert "\n"))
+            (dolist (pres presentations)
+              (let ((start (point))
+                    (pres-id (alist-get 'id pres)))
+                (insert (format "  [#%d] %s" pres-id
+                                (alist-get 'conference pres)))
+                (let ((loc (alist-get 'location pres))
+                      (date (alist-get 'date pres))
+                      (type (alist-get 'presentation_type pres)))
+                  (when type (insert (format " (%s)" type)))
+                  (when loc (insert (format ", %s" loc)))
+                  (when date (insert (format " — %s" date))))
+                (insert "\n")
+                (put-text-property start (point)
+                                   'merita-presentation-id pres-id)))
+            (insert "\n" (make-string 50 ?─) "\n")
+            (insert (propertize "  d" 'face 'help-key-binding) " Delete  "
+                    (propertize "a" 'face 'help-key-binding) " Add  "
+                    (propertize "g" 'face 'help-key-binding) " Refresh  "
+                    (propertize "q" 'face 'help-key-binding) " Quit\n")
+            (goto-char (point-min))
+            (merita-presentations-mode)
+            (setq merita--presentations-entry-id entry-id)))
+        (pop-to-buffer buf)))))
+
+(defun merita-presentations-delete ()
+  "Delete the presentation at point."
+  (interactive)
+  (let ((pres-id (get-text-property (point) 'merita-presentation-id)))
+    (if (not pres-id)
+        (message "No presentation at point.")
+      (when (yes-or-no-p (format "Delete presentation #%d? " pres-id))
+        (merita--delete-presentation pres-id)
+        (merita-presentations-refresh)))))
+
+(defun merita-presentations-add ()
+  "Add a presentation to the current entry."
+  (interactive)
+  (when merita--presentations-entry-id
+    (merita-add-presentation merita--presentations-entry-id)
+    (merita-presentations-refresh)))
+
+(defun merita-presentations-refresh ()
+  "Refresh the presentations listing."
+  (interactive)
+  (when merita--presentations-entry-id
+    (merita-list-presentations merita--presentations-entry-id)))
+
+;;; ** 2.5. Related Entries (Cross-Links)
+
+(defun merita--refresh-link-count (&rest entry-ids)
+  "Update the `links' column for each id in ENTRY-IDS.
+If called with no arguments, refreshes all entries."
+  (let ((db (merita--ensure-db)))
+    (if entry-ids
+        (dolist (eid entry-ids)
+          (let ((n (or (caar (sqlite-select db
+                               "SELECT COUNT(*) FROM related_entries
+                                WHERE entry_id = ?"
+                               (list eid))) 0)))
+            (sqlite-execute db "UPDATE data SET links = ? WHERE id = ?"
+                            (list n eid))))
+      ;; Bulk refresh all
+      (sqlite-execute db
+        "UPDATE data SET links = (
+           SELECT COUNT(*) FROM related_entries
+           WHERE related_entries.entry_id = data.id)"))))
+
+(defun merita--insert-relation (entry-id related-id relation-type &optional notes)
+  "Link ENTRY-ID and RELATED-ID with RELATION-TYPE.
+Inserts both directions so queries from either side find the link.
+NOTES is an optional annotation."
+  (let ((db (merita--ensure-db)))
+    (sqlite-execute db
+      "INSERT OR IGNORE INTO related_entries (entry_id, related_id, relation_type, notes)
+       VALUES (?, ?, ?, ?)"
+      (list entry-id related-id relation-type notes))
+    (sqlite-execute db
+      "INSERT OR IGNORE INTO related_entries (entry_id, related_id, relation_type, notes)
+       VALUES (?, ?, ?, ?)"
+      (list related-id entry-id relation-type notes))
+    (merita--refresh-link-count entry-id related-id)
+    (caar (sqlite-select db "SELECT last_insert_rowid()"))))
+
+(defun merita--get-related (entry-id &optional relation-type)
+  "Get all entries related to ENTRY-ID.
+If RELATION-TYPE is non-nil, filter by that type.
+Returns list of alists."
+  (let* ((db (merita--ensure-db))
+         (sql (concat
+               "SELECT r.id, r.related_id, r.relation_type, r.notes,
+                       d.title, d.type, d.year, d.pkg_name, d.pkg_registry
+                FROM related_entries r
+                JOIN data d ON d.id = r.related_id
+                WHERE r.entry_id = ?"
+               (when relation-type " AND r.relation_type = ?")
+               " ORDER BY d.year ASC"))
+         (params (if relation-type
+                     (list entry-id relation-type)
+                   (list entry-id)))
+         (rows (sqlite-select db sql params 'full)))
+    (when (and rows (> (length rows) 1))
+      (let ((columns (mapcar #'intern (car rows))))
+        (mapcar (lambda (row) (cl-mapcar #'cons columns row))
+                (cdr rows))))))
+
+(defun merita--delete-relation (relation-id)
+  "Delete the relation with RELATION-ID and its reverse."
+  (let* ((db (merita--ensure-db))
+         (row (car (sqlite-select db
+                     "SELECT entry_id, related_id, relation_type
+                      FROM related_entries WHERE id = ?"
+                     (list relation-id)))))
+    (when row
+      (let ((eid (nth 0 row))
+            (rid (nth 1 row))
+            (rtype (nth 2 row)))
+        (sqlite-execute db
+          "DELETE FROM related_entries
+           WHERE (entry_id = ? AND related_id = ? AND relation_type = ?)
+              OR (entry_id = ? AND related_id = ? AND relation_type = ?)"
+          (list eid rid rtype rid eid rtype))
+        (merita--refresh-link-count eid rid)))))
+
+(defun merita--delete-relations-for-entry (entry-id)
+  "Delete all relations involving ENTRY-ID (both directions).
+Refreshes link counts for all formerly-linked entries."
+  (let* ((db (merita--ensure-db))
+         (peers (mapcar #'car
+                        (sqlite-select db
+                          "SELECT DISTINCT related_id FROM related_entries
+                           WHERE entry_id = ?"
+                          (list entry-id)))))
+    (sqlite-execute db
+      "DELETE FROM related_entries
+       WHERE entry_id = ? OR related_id = ?"
+      (list entry-id entry-id))
+    (dolist (peer peers)
+      (merita--refresh-link-count peer))))
+
+;;;###autoload
+(defun merita-link-entries (entry-id related-id relation-type &optional notes)
+  "Link two entries as related scholarly works.
+ENTRY-ID and RELATED-ID are database IDs.  RELATION-TYPE is one of
+`merita-relation-types'."
+  (interactive
+   (let* ((eid (merita--read-entry-id "First entry: "))
+          (rid (merita--read-entry-id "Related entry: "))
+          (rtype (completing-read "Relation type: "
+                                  merita-relation-types nil t))
+          (notes (merita--read-field "Notes (optional)")))
+     (list eid rid rtype (unless (string-empty-p (or notes "")) notes))))
+  (let ((e1 (merita--get entry-id))
+        (e2 (merita--get related-id)))
+    (unless e1 (user-error "Entry %d not found" entry-id))
+    (unless e2 (user-error "Entry %d not found" related-id))
+    (merita--insert-relation entry-id related-id relation-type notes)
+    (message "Linked #%d (%s) <-> #%d (%s) [%s]"
+             entry-id
+             (merita--truncate (or (alist-get 'title e1) "") 30)
+             related-id
+             (merita--truncate (or (alist-get 'title e2) "") 30)
+             relation-type)))
+
+;;;###autoload
+(defun merita-unlink-entries (entry-id related-id)
+  "Remove the link between ENTRY-ID and RELATED-ID."
+  (interactive
+   (list (merita--read-entry-id "First entry: ")
+         (merita--read-entry-id "Second entry: ")))
+  (let ((db (merita--ensure-db)))
+    (sqlite-execute db
+      "DELETE FROM related_entries
+       WHERE (entry_id = ? AND related_id = ?)
+          OR (entry_id = ? AND related_id = ?)"
+      (list entry-id related-id related-id entry-id))
+    (merita--refresh-link-count entry-id related-id)
+    (message "Unlinked #%d <-> #%d" entry-id related-id)))
+
+;;;###autoload
+(defun merita-list-related (entry-id)
+  "Display all entries related to ENTRY-ID."
+  (interactive
+   (list (merita--read-entry-id "Show relations for: ")))
+  (let* ((entry (merita--get entry-id))
+         (related (merita--get-related entry-id)))
+    (if (null related)
+        (message "No related entries for #%d" entry-id)
+      (let ((buf (get-buffer-create "*merita-related*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (format "=== Related entries for #%d: %s ===\n\n"
+                            entry-id
+                            (merita--truncate (or (alist-get 'title entry) "") 50)))
+            (dolist (rel related)
+              (insert (format "  #%-4d [%-15s] %-12s %s\n"
+                              (alist-get 'related_id rel)
+                              (or (alist-get 'relation_type rel) "")
+                              (or (alist-get 'type rel) "")
+                              (merita--truncate
+                               (or (alist-get 'title rel) "") 50))))
+            (goto-char (point-min))
+            (special-mode)))
+        (pop-to-buffer buf)))))
+
+;;; * 3. Data Entry
+
+;;; ** 3.1. Input Helpers
+
+(defun merita--read-field (prompt &optional default history require)
+  "Read a string with PROMPT.
+DEFAULT, HISTORY, and REQUIRE behave as in `read-string'."
+  (let* ((p (if default (format "%s [%s]: " prompt default)
+              (format "%s: " prompt)))
+         (val (read-string p nil history default)))
+    (if (and require (string-empty-p val))
+        (user-error "%s is required" prompt)
+      (if (string-empty-p val) nil val))))
+
+(defun merita--read-number-field (prompt)
+  "Read a numeric field with PROMPT.  Return number or nil."
+  (let ((val (read-string (format "%s: " prompt))))
+    (if (string-empty-p val) nil (string-to-number val))))
+
+(defun merita--read-entry-type ()
+  "Read an entry type with completion."
+  (intern (completing-read "Entry type: "
+                           (mapcar #'symbol-name merita-entry-types)
+                           nil t)))
+
+(defun merita--read-author-position ()
+  "Read an author position with completion."
+  (intern (completing-read "Author position: "
+                           (mapcar #'symbol-name merita-author-positions)
+                           nil t)))
+
+(defun merita--read-status ()
+  "Read a status value with completion."
+  (intern (completing-read "Status: "
+                           (mapcar #'symbol-name merita-status-values)
+                           nil t nil nil "published")))
+
+(defun merita--read-journal-with-completion (prompt)
+  "Read journal name with PROMPT, completing from existing journals."
+  (let* ((db (merita--ensure-db))
+         (journals (mapcar #'car
+                           (sqlite-select db
+                             "SELECT DISTINCT journal FROM data
+                              WHERE journal IS NOT NULL ORDER BY journal"))))
+    (completing-read (format "%s: " prompt) journals nil nil)))
+
+;;; ** 3.2. Interactive Entry
+
+;;;###autoload
+(defun merita-add ()
+  "Add a new entry interactively."
+  (interactive)
+  (merita--ensure-db)
+  (let* ((entry-type (merita--read-entry-type))
+         (title (merita--read-field "Title" nil nil t))
+         (authors (merita--read-field "Authors (comma-separated)"))
+         (year (merita--read-number-field "Year"))
+         (position (merita--read-author-position))
+         (status (merita--read-status))
+         (alist (list (cons 'type (symbol-name entry-type))
+                      (cons 'title title))))
+    (when authors (push (cons 'authors authors) alist))
+    (when year (push (cons 'year year) alist))
+    (push (cons 'author_position (symbol-name position)) alist)
+    (push (cons 'status (symbol-name status)) alist)
+    ;; Type-specific fields
+    (pcase entry-type
+      ((or 'journal-article 'review-article 'editorial 'letter 'case-report)
+       (let ((journal (merita--read-journal-with-completion "Journal"))
+             (volume (merita--read-field "Volume"))
+             (issue (merita--read-field "Issue"))
+             (pages (merita--read-field "Pages"))
+             (doi (merita--read-field "DOI"))
+             (pmid (merita--read-field "PMID")))
+         (when journal (push (cons 'journal journal) alist))
+         (when volume (push (cons 'volume volume) alist))
+         (when issue (push (cons 'issue issue) alist))
+         (when pages (push (cons 'pages pages) alist))
+         (when doi (push (cons 'doi doi) alist))
+         (when pmid (push (cons 'pmid pmid) alist))))
+      ('book-chapter
+       (let ((book-title (merita--read-field "Book title" nil nil t))
+             (editors (merita--read-field "Editor(s)"))
+             (publisher (merita--read-field "Publisher"))
+             (pages (merita--read-field "Pages"))
+             (isbn (merita--read-field "ISBN"))
+             (doi (merita--read-field "DOI")))
+         (push (cons 'book_title book-title) alist)
+         (when editors (push (cons 'editors editors) alist))
+         (when publisher (push (cons 'publisher publisher) alist))
+         (when pages (push (cons 'pages pages) alist))
+         (when isbn (push (cons 'isbn isbn) alist))
+         (when doi (push (cons 'doi doi) alist))))
+      ('book
+       (let ((publisher (merita--read-field "Publisher"))
+             (edition (merita--read-field "Edition"))
+             (isbn (merita--read-field "ISBN"))
+             (doi (merita--read-field "DOI")))
+         (when publisher (push (cons 'publisher publisher) alist))
+         (when edition (push (cons 'edition edition) alist))
+         (when isbn (push (cons 'isbn isbn) alist))
+         (when doi (push (cons 'doi doi) alist))))
+      ((or 'podium 'poster 'invited-talk 'keynote 'workshop)
+       (let ((conference (merita--read-field "Conference"))
+             (location (merita--read-field "Location"))
+             (conf-date (merita--read-field "Presentation date"))
+             (org (merita--read-field "Sponsoring organization")))
+         (when conference (push (cons 'conference conference) alist))
+         (when location (push (cons 'conference_location location) alist))
+         (when conf-date (push (cons 'conference_date conf-date) alist))
+         (when org (push (cons 'organization org) alist))))
+      ((or 'thesis-doctoral 'thesis-masters)
+       (let ((school (merita--read-field "School"))
+             (doi (merita--read-field "DOI")))
+         (when school (push (cons 'school school) alist))
+         (when doi (push (cons 'doi doi) alist))))
+      ('grant
+       (let ((funding (merita--read-field "Grant number(s)"))
+             (role (merita--read-field "Role (PI, Co-PI, etc.)"))
+             (amount (merita--read-number-field "Grant amount"))
+             (period (merita--read-field "Grant period"))
+             (org (merita--read-field "Funding organization")))
+         (when funding (push (cons 'funding funding) alist))
+         (when role (push (cons 'grant_role role) alist))
+         (when amount (push (cons 'grant_amount amount) alist))
+         (when period (push (cons 'grant_period period) alist))
+         (when org (push (cons 'organization org) alist))))
+      ('award
+       (let ((body (merita--read-field "Awarding body"))
+             (org (merita--read-field "Organization"))
+             (awards-text (merita--read-field "Award description(s) (;-delimited)")))
+         (when body (push (cons 'award_body body) alist))
+         (when org (push (cons 'organization org) alist))
+         (when awards-text (push (cons 'awards awards-text) alist))))
+      ((or 'software 'dataset)
+       (let ((repo-url (merita--read-field "Repository URL (e.g., GitHub)"))
+             (entry-url (merita--read-field "Project URL"))
+             (language (merita--read-field "Programming language"))
+             (registry (merita--read-field "Package registry (cran, pypi, melpa, npm)"))
+             (pkg-name (merita--read-field "Package name in registry"))
+             (pkg-version (merita--read-field "Current version"))
+             (doi (merita--read-field "DOI (if published)")))
+         (when repo-url (push (cons 'repo_url repo-url) alist))
+         (when entry-url (push (cons 'url entry-url) alist))
+         (when language (push (cons 'repo_language language) alist))
+         (when registry (push (cons 'pkg_registry registry) alist))
+         (when pkg-name (push (cons 'pkg_name pkg-name) alist))
+         (when pkg-version (push (cons 'pkg_version pkg-version) alist))
+         (when doi (push (cons 'doi doi) alist)))))
+    ;; Optional fields for all types
+    (when (y-or-n-p "Add optional fields? ")
+      (let ((month (merita--read-number-field "Month (1-12)"))
+            (day (merita--read-number-field "Day (1-31)"))
+            (impact-factor (merita--read-number-field "Impact factor"))
+            (keywords (merita--read-field "Keywords (;-delimited)"))
+            (awards-text (merita--read-field "Awards (;-delimited, if any)"))
+            (notes (merita--read-field "Notes"))
+            (bibtex-key (merita--read-field "BibTeX key")))
+        (when month (push (cons 'month month) alist))
+        (when day (push (cons 'day day) alist))
+        (when impact-factor (push (cons 'impact_factor impact-factor) alist))
+        (when keywords (push (cons 'keywords keywords) alist))
+        (when awards-text (push (cons 'awards awards-text) alist))
+        (when notes (push (cons 'notes notes) alist))
+        (when bibtex-key (push (cons 'bibtex_key bibtex-key) alist))))
+    ;; Insert
+    (let ((id (merita--insert alist)))
+      (message "Added entry #%d: %s" id title)
+      (when (y-or-n-p "View entry? ")
+        (merita--display-entry (merita--get id)))
+      id)))
+
+;;; ** 3.3. Edit and Delete
+
+(defconst merita--editable-fields
+  '(title authors year month day journal journal_abbrev volume issue
+    pages doi pmid pmcid url author_position author_count status
+    peer_reviewed keywords notes tags awards award_body
+    conference conference_location conference_date organization
+    school publisher edition editors book_title isbn
+    funding grant_role grant_amount grant_period
+    impact_factor abstract bibtex_key
+    repo_url pkg_registry pkg_name pkg_version)
+  "Fields available for interactive editing.")
+
+(defconst merita--choice-fields
+  `((author_position . ,(mapcar #'symbol-name merita-author-positions))
+    (status          . ,(mapcar #'symbol-name merita-status-values))
+    (peer_reviewed   . ("1" "0"))
+    (grant_role      . ("PI" "Co-PI" "Co-I" "Mentor" "Trainee" "Other"))
+    (pkg_registry    . ("" "CRAN" "PyPI" "MELPA" "npm" "Bioconductor")))
+  "Alist mapping field names to valid choices for completion.")
+
+(defun merita--read-field-value (field current-str)
+  "Prompt for a value for FIELD, showing CURRENT-STR as default.
+Uses `completing-read' for choice fields, `read-string' otherwise."
+  (let ((choices (alist-get field merita--choice-fields)))
+    (if choices
+        (completing-read (format "%s [%s]: " field current-str)
+                         choices nil t nil nil current-str)
+      (read-string (format "%s [%s]: " field current-str)
+                   nil nil current-str))))
+
+;;;###autoload
+(defun merita-edit-field (id &optional field)
+  "Edit a single FIELD of entry ID.
+When called interactively, prompts for the entry and field."
+  (interactive
+   (let* ((id (merita--read-entry-id "Edit entry: "))
+          (field (intern (completing-read "Field: "
+                           (mapcar #'symbol-name merita--editable-fields)
+                           nil t))))
+     (list id field)))
+  (let* ((entry (merita--get id))
+         (current (alist-get field entry))
+         (current-str (if current (format "%s" current) ""))
+         (new-val (merita--read-field-value field current-str)))
+    (unless (equal new-val current-str)
+      (merita--update id (list (cons field
+                                     (if (string-empty-p new-val) nil new-val))))
+      (message "Updated #%d.%s" id field))))
+
+;;;###autoload
+(defun merita-edit (id)
+  "Edit entry ID interactively.
+Prompts for which fields to edit, then steps through each one."
+  (interactive (list (merita--read-entry-id "Edit entry: ")))
+  (let* ((entry (merita--get id))
+         (changes '()))
+    (unless entry (user-error "Entry %d not found" id))
+    ;; Show current entry in message area
+    (message "Editing #%d: %s (%s)"
+             id
+             (merita--truncate (or (alist-get 'title entry) "") 50)
+             (or (alist-get 'year entry) ""))
+    ;; Select fields to edit
+    (let* ((field-names (mapcar #'symbol-name merita--editable-fields))
+           (selected (completing-read-multiple
+                      "Fields to edit (comma-separated): "
+                      field-names nil t)))
+      (dolist (field-str selected)
+        (let* ((field (intern field-str))
+               (current (alist-get field entry))
+               (current-str (if current (format "%s" current) ""))
+               (new-val (merita--read-field-value field current-str)))
+          (unless (equal new-val current-str)
+            (push (cons field (if (string-empty-p new-val) nil new-val))
+                  changes)))))
+    (if changes
+        (progn
+          (merita--update id changes)
+          (message "Updated entry #%d (%d fields changed)" id (length changes)))
+      (message "No changes."))))
+
+;;;###autoload
+(defun merita-delete (id)
+  "Delete entry ID after confirmation."
+  (interactive (list (merita--read-entry-id "Delete entry: ")))
+  (let ((entry (merita--get id)))
+    (unless entry (user-error "Entry %d not found" id))
+    (when (yes-or-no-p
+           (format "Delete #%d: %s? "
+                   id (merita--truncate (alist-get 'title entry) 50)))
+      (merita--delete id)
+      (message "Deleted entry #%d." id))))
+
+;;; * 4. Search & Display
+
+;;; ** 4.1. Completion Interface
+
+(defun merita--entry-candidates ()
+  "Generate completing-read candidates as (DISPLAY . ID) alist."
+  (let ((entries (merita--query
+                  "SELECT id, type, title, authors, year, journal
+                   FROM data ORDER BY year DESC, title ASC")))
+    (mapcar (lambda (entry)
+              (let* ((id (alist-get 'id entry))
+                     (type (alist-get 'type entry))
+                     (title (merita--truncate (or (alist-get 'title entry) "") 60))
+                     (authors (merita--truncate (or (alist-get 'authors entry) "") 30))
+                     (year (or (alist-get 'year entry) ""))
+                     (journal (or (alist-get 'journal entry) "")))
+                (cons (format "[%s] %s (%s) %s — %s"
+                              type authors year title journal)
+                      id)))
+            entries)))
+
+(defun merita--read-entry-id (prompt)
+  "Read an entry ID using completing-read with PROMPT."
+  (let* ((candidates (merita--entry-candidates))
+         (selected (completing-read prompt candidates nil t)))
+    (cdr (assoc selected candidates))))
+
+;;; ** 4.2. Search
+
+;;;###autoload
+(defun merita-find ()
+  "Find and display an entry using completing-read."
+  (interactive)
+  (let ((id (merita--read-entry-id "Find entry: ")))
+    (merita--display-entry (merita--get id))))
+
+;;;###autoload
+(defun merita-search (query)
+  "Search entries matching QUERY in title, authors, or journal."
+  (interactive "sSearch: ")
+  (let* ((pattern (format "%%%s%%" query))
+         (entries (merita--query
+                   "SELECT id, type, year, title, authors, journal
+                    FROM data
+                    WHERE title LIKE ? OR authors LIKE ? OR journal LIKE ?
+                    ORDER BY year DESC"
+                   (list pattern pattern pattern))))
+    (if entries
+        (merita--display-results entries query)
+      (message "No results for: %s" query))))
+
+;;; ** 4.3. Display Helpers
+
+(defun merita--truncate (str max-len)
+  "Truncate STR to MAX-LEN with ellipsis."
+  (if (> (length str) max-len)
+      (concat (substring str 0 (1- max-len)) "…")
+    str))
+
+(defun merita--entry-short-title (entry)
+  "Return a short citation label for ENTRY, e.g. \"McClelland et al. (2024-09)\"."
+  (let* ((authors (or (alist-get 'authors entry) ""))
+         (year-raw (alist-get 'year entry))
+         (month-raw (alist-get 'month entry))
+         (year (and year-raw (not (equal year-raw "")) (if (stringp year-raw) (string-to-number year-raw) year-raw)))
+         (month (and month-raw (not (equal month-raw "")) (if (stringp month-raw) (string-to-number month-raw) month-raw)))
+         (first-author (if (string-match "\\`\\([^,]+\\)" authors)
+                           (match-string 1 authors)
+                         "Unknown"))
+         (author-count (if (string-empty-p authors) 0
+                         (1+ (cl-count ?, authors))))
+         (author-str (if (> author-count 1)
+                         (format "%s et al." first-author)
+                       first-author))
+         (date-str (cond
+                    ((and year month) (format "%d-%02d" year month))
+                    (year (format "%d" year))
+                    (t "n.d."))))
+    (format "%s (%s)" author-str date-str)))
+
+(defun merita--open-url (id)
+  "Open the DOI or PMID for entry ID in a browser."
+  (let ((entry (merita--get id)))
+    (if entry
+        (let ((doi (alist-get 'doi entry))
+              (pmid (alist-get 'pmid entry))
+              (url (alist-get 'url entry)))
+          (cond
+           ((and doi (stringp doi) (not (string-empty-p doi)))
+            (let ((target (format "https://doi.org/%s" doi)))
+              (message "Opening %s" target)
+              (browse-url target)))
+           ((and pmid (not (eq pmid :null))
+                 (not (equal pmid ""))
+                 (not (equal pmid 0)))
+            (let ((target (format "https://pubmed.ncbi.nlm.nih.gov/%s" pmid)))
+              (message "Opening %s" target)
+              (browse-url target)))
+           ((and url (stringp url) (not (string-empty-p url)))
+            (message "Opening %s" url)
+            (browse-url url))
+           (t (message "No DOI, PMID, or URL for entry #%d." id))))
+      (message "Entry #%d not found." id))))
+
+;;; ** 4.4. Entry View Mode
+
+(defvar-local merita--entry-id nil
+  "ID of the entry displayed in the current buffer.")
+
+(defvar merita-entry-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'merita-entry-edit)
+    (define-key map (kbd "E") #'merita-entry-edit)
+    (define-key map (kbd "e") #'merita-entry-export)
+    (define-key map (kbd "D") #'merita-entry-delete)
+    (define-key map (kbd "n") #'merita-entry-next)
+    (define-key map (kbd "p") #'merita-entry-prev)
+    (define-key map (kbd "M-n") #'merita-entry-next)
+    (define-key map (kbd "M-p") #'merita-entry-prev)
+    (define-key map (kbd "a") #'merita-add)
+    (define-key map (kbd "b") #'merita-entry-open-url)
+    (define-key map (kbd "m") #'merita-entry-metrics)
+    (define-key map (kbd "L") #'merita-entry-link)
+    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "g") #'merita-entry-refresh)
+    (define-key map (kbd "=") #'merita-entry-refresh)
+    map)
+  "Keymap for `merita-entry-mode'.")
+
+(define-derived-mode merita-entry-mode special-mode "Merita Entry"
+  "Mode for viewing a single Merita entry.
+\\{merita-entry-mode-map}")
+
+(defconst merita--entry-field-order
+  '(type title authors year month day
+    journal journal_abbrev volume issue pages eid
+    book_title publisher edition editors series isbn
+    conference conference_location conference_date organization
+    school doi pmid pmcid arxiv_id url
+    author_position author_count impact_factor citations altmetric
+    status peer_reviewed abstract keywords mesh_terms
+    funding grant_role grant_amount grant_period
+    awards award_body notes tags
+    bibtex_key bibtex_type
+    repo_url repo_language pkg_registry pkg_name pkg_version
+    links date_added date_modified)
+  "Display order for fields in the entry view buffer.")
+
+(defun merita--display-entry (entry)
+  "Display ENTRY in the entry view buffer."
+  (let ((buf (get-buffer-create "*merita-entry*"))
+        (id (alist-get 'id entry))
+        (w 80))  ; display width
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        ;; Header: short citation label
+        (insert (propertize (merita--entry-short-title entry)
+                            'face '(:weight bold :height 1.2)))
+        (insert "\n" (make-string w ?─) "\n\n")
+        ;; Formatted citation preview — word-wrapped to width
+        (let* ((merita--latex-context nil)
+               (fmt (funcall (merita--resolve-citation-style
+                              merita-default-citation-style)
+                             entry)))
+          (when (and fmt (not (string-empty-p fmt)))
+            (let ((start (point))
+                  (fill-prefix "  ")
+                  (fill-column (- w 2)))
+              (insert "  " fmt "\n")
+              (fill-region start (point))
+              (put-text-property start (point) 'face 'font-lock-doc-face))
+            (insert "\n")))
+        ;; Field/value pairs in database column order
+        (let ((val-width (- w 25)))  ; 2 indent + 20 field + 1 space + val + 2 trailing
+          (dolist (key merita--entry-field-order)
+            (let ((val (alist-get key entry)))
+              (when (and val (not (equal val "")) (not (eq val 0))
+                         (not (eq val :null)))
+                (insert (format "  %-20s %s\n"
+                                (propertize (symbol-name key)
+                                            'face 'font-lock-keyword-face)
+                                (merita--truncate (format "%s" val)
+                                                  val-width)))))))
+        ;; Show linked entries
+        (let ((related (merita--get-related id)))
+          (when related
+            (insert "\n  " (propertize "Linked entries:"
+                                       'face 'font-lock-type-face) "\n")
+            (dolist (rel related)
+              (let* ((rtype (or (alist-get 'relation_type rel) ""))
+                     (overhead (+ 12 (length rtype))))  ; "    #NNN  [type] "
+                (insert (format "    #%-4d [%s] %s\n"
+                                (alist-get 'related_id rel)
+                                rtype
+                                (merita--truncate
+                                 (or (alist-get 'title rel) "")
+                                 (- w overhead))))))))
+        (insert "\n" (make-string w ?─) "\n")
+        (insert "  " (propertize "RET" 'face 'help-key-binding) "/"
+                (propertize "E" 'face 'help-key-binding) " Edit  "
+                (propertize "D" 'face 'help-key-binding) " Delete  "
+                (propertize "L" 'face 'help-key-binding) " Link  "
+                (propertize "n" 'face 'help-key-binding) "/"
+                (propertize "p" 'face 'help-key-binding) " Next/Prev\n"
+                "  " (propertize "e" 'face 'help-key-binding) " Export  "
+                (propertize "b" 'face 'help-key-binding) " Open URL  "
+                (propertize "q" 'face 'help-key-binding) " Quit\n")
+        (goto-char (point-min))
+        (merita-entry-mode)
+        (setq merita--entry-id id)))
+    (merita--display-entry-buffer buf)))
+
+(defun merita--display-entry-buffer (buf)
+  "Display entry buffer BUF according to `merita-entry-display'."
+  (pcase merita-entry-display
+    ('side
+     (display-buffer buf
+                     '(display-buffer-in-direction
+                       (direction . right)
+                       (window-width . 84))))
+    (_ (pop-to-buffer buf))))
+
+(defun merita-entry-refresh ()
+  "Refresh the current entry view."
+  (interactive)
+  (when merita--entry-id
+    (let ((entry (merita--get merita--entry-id)))
+      (if entry
+          (merita--display-entry entry)
+        (message "Entry #%d no longer exists." merita--entry-id)))))
+
+(defun merita-entry-edit ()
+  "Edit the entry displayed in this buffer."
+  (interactive)
+  (when merita--entry-id
+    (merita-edit merita--entry-id)
+    (merita-entry-refresh)))
+
+(defun merita-entry-delete ()
+  "Delete the entry displayed in this buffer."
+  (interactive)
+  (when merita--entry-id
+    (merita-delete merita--entry-id)))
+
+(defun merita-entry-open-url ()
+  "Open the DOI, PMID, or URL of the displayed entry in a browser."
+  (interactive)
+  (when merita--entry-id
+    (merita--open-url merita--entry-id)))
+
+(defun merita-entry-metrics ()
+  "Show metrics for the displayed entry."
+  (interactive)
+  (when merita--entry-id
+    (if (fboundp 'merita-metrics-format-entry)
+        (message "%s" (merita-metrics-format-entry merita--entry-id))
+      (message "Metrics module not loaded."))))
+
+(defun merita-entry-link ()
+  "Link the displayed entry to another."
+  (interactive)
+  (when merita--entry-id
+    (let ((rid (merita--read-entry-id "Link to: "))
+          (rtype (completing-read "Relation type: "
+                                  merita-relation-types nil t)))
+      (merita--insert-relation merita--entry-id rid rtype)
+      (merita-entry-refresh))))
+
+(defun merita-entry-export ()
+  "Export the displayed entry via the format dispatcher."
+  (interactive)
+  (when merita--entry-id
+    (merita-export-entry merita--entry-id)))
+
+(defun merita--resolve-citation-style (style-sym)
+  "Return the formatter function for STYLE-SYM."
+  (or (cdr (assoc (symbol-name style-sym) merita--style-formatter-map))
+      (user-error "Unknown citation style: %s" style-sym)))
+
+(defun merita-export-entry (id)
+  "Export entry ID in a chosen format and citation style.
+Prompts for format (plain text, LaTeX, BibTeX, RIS), then for
+citation style if applicable.  Text and LaTeX are copied to the
+kill ring; BibTeX and RIS prompt for a filename."
+  (interactive (list (merita--read-entry-id "Export entry: ")))
+  (let* ((entry (merita--get id))
+         (format-choices '("plain text" "latex" "bibtex" "ris"))
+         (fmt (completing-read "Export format: " format-choices nil t))
+         (style-names (mapcar #'car merita--style-formatter-map))
+         (default-style (symbol-name merita-default-citation-style)))
+    (pcase fmt
+      ("plain text"
+       (let* ((style (completing-read
+                       (format "Citation style [%s]: " default-style)
+                       style-names nil t nil nil default-style))
+              (formatter (cdr (assoc style merita--style-formatter-map)))
+              (merita--latex-context nil)
+              (text (funcall formatter entry)))
+         (kill-new text)
+         (message "Copied %s citation to kill ring." style)))
+      ("latex"
+       (let* ((style (completing-read
+                       (format "Citation style [%s]: " default-style)
+                       style-names nil t nil nil default-style))
+              (formatter (cdr (assoc style merita--style-formatter-map)))
+              (merita--latex-context t)
+              (text (funcall formatter entry)))
+         (kill-new text)
+         (message "Copied LaTeX (%s) citation to kill ring." style)))
+      ("bibtex"
+       (let* ((text (merita--entry-to-bibtex entry))
+              (filename (read-file-name "Save BibTeX to: "
+                                        merita-default-export-directory nil nil
+                                        (format "entry-%d.bib" id))))
+         (with-temp-file filename
+           (insert text "\n"))
+         (message "Exported to %s" filename)))
+      ("ris"
+       (let* ((text (merita--entry-to-ris entry))
+              (filename (read-file-name "Save RIS to: "
+                                        merita-default-export-directory nil nil
+                                        (format "entry-%d.ris" id))))
+         (with-temp-file filename
+           (insert text "\n"))
+         (message "Exported to %s" filename))))))
+
+(defun merita--entry-date-val (val fallback)
+  "Coerce VAL to an integer for date comparison.
+Returns FALLBACK for nil, empty strings, and :null."
+  (cond
+   ((null val) fallback)
+   ((eq val :null) fallback)
+   ((and (stringp val) (string-empty-p val)) fallback)
+   ((stringp val) (string-to-number val))
+   ((numberp val) val)
+   (t fallback)))
+
+(defconst merita--sort-year-sql
+  "CASE WHEN year IS NULL OR year = '' THEN 9999 ELSE year END"
+  "SQL expression for year sort key (nulls sort last).")
+
+(defconst merita--sort-month-sql
+  "CASE WHEN month IS NULL OR month = '' THEN 99 ELSE month END"
+  "SQL expression for month sort key (nulls sort last).")
+
+(defconst merita--sort-day-sql
+  "CASE WHEN day IS NULL OR day = '' THEN 99 ELSE day END"
+  "SQL expression for day sort key (nulls sort last).")
+
+(defun merita-entry-next ()
+  "Display the next entry forward in time (newer, then undated)."
+  (interactive)
+  (when merita--entry-id
+    (let* ((db (merita--ensure-db))
+           (cur (merita--get merita--entry-id))
+           (yr (merita--entry-date-val (alist-get 'year cur) 9999))
+           (mo (merita--entry-date-val (alist-get 'month cur) 99))
+           (dy (merita--entry-date-val (alist-get 'day cur) 99))
+           (row (caar (sqlite-select db
+                        (format "SELECT id FROM data
+                         WHERE (%s, %s, %s, id) > (?, ?, ?, ?)
+                         ORDER BY %s ASC, %s ASC, %s ASC, id ASC
+                         LIMIT 1"
+                                merita--sort-year-sql merita--sort-month-sql merita--sort-day-sql
+                                merita--sort-year-sql merita--sort-month-sql merita--sort-day-sql)
+                        (list yr mo dy merita--entry-id)))))
+      (if row
+          (merita--display-entry (merita--get row))
+        (message "Most recent entry.")))))
+
+(defun merita-entry-prev ()
+  "Display the next entry backward in time (older)."
+  (interactive)
+  (when merita--entry-id
+    (let* ((db (merita--ensure-db))
+           (cur (merita--get merita--entry-id))
+           (yr (merita--entry-date-val (alist-get 'year cur) 9999))
+           (mo (merita--entry-date-val (alist-get 'month cur) 99))
+           (dy (merita--entry-date-val (alist-get 'day cur) 99))
+           (row (caar (sqlite-select db
+                        (format "SELECT id FROM data
+                         WHERE (%s, %s, %s, id) < (?, ?, ?, ?)
+                         ORDER BY %s DESC, %s DESC, %s DESC, id DESC
+                         LIMIT 1"
+                                merita--sort-year-sql merita--sort-month-sql merita--sort-day-sql
+                                merita--sort-year-sql merita--sort-month-sql merita--sort-day-sql)
+                        (list yr mo dy merita--entry-id)))))
+      (if row
+          (merita--display-entry (merita--get row))
+        (message "Oldest entry.")))))
+
+;;; ** 4.5. Results Mode
+
+(defvar merita-results-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'merita-results-view)
+    (define-key map (kbd "e") #'merita-results-edit)
+    (define-key map (kbd "d") #'merita-results-delete)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `merita-results-mode'.")
+
+(define-derived-mode merita-results-mode special-mode "Merita Results"
+  "Mode for browsing Merita search results.
+\\{merita-results-mode-map}")
+
+(defun merita--display-results (entries query)
+  "Display ENTRIES in a results buffer for QUERY."
+  (let ((buf (get-buffer-create "*merita-results*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (format "Search: \"%s\" (%d results)" query (length entries))
+                            'face '(:weight bold)))
+        (insert "\n" (make-string 50 ?─) "\n\n")
+        (dolist (entry entries)
+          (let ((id (alist-get 'id entry))
+                (start (point)))
+            (insert (format "  [%4s] %-18s %s\n"
+                            (or (alist-get 'year entry) "")
+                            (or (alist-get 'type entry) "")
+                            (merita--truncate
+                             (or (alist-get 'title entry) "") 55)))
+            (insert (format "         %s\n"
+                            (merita--truncate
+                             (or (alist-get 'authors entry) "") 65)))
+            (let ((j (alist-get 'journal entry)))
+              (when j (insert (format "         %s\n" j))))
+            (put-text-property start (point) 'merita-entry-id id)
+            (insert "\n")))
+        (insert (make-string 50 ?─) "\n")
+        (insert (propertize "  RET" 'face 'help-key-binding) " View  "
+                (propertize "e" 'face 'help-key-binding) " Edit  "
+                (propertize "d" 'face 'help-key-binding) " Delete  "
+                (propertize "q" 'face 'help-key-binding) " Quit\n")
+        (goto-char (point-min))
+        (merita-results-mode)))
+    (pop-to-buffer buf)))
+
+(defun merita--results-id-at-point ()
+  "Return the entry ID at point in a results buffer, or nil."
+  (get-text-property (point) 'merita-entry-id))
+
+(defun merita-results-view ()
+  "View the entry at point."
+  (interactive)
+  (let ((id (merita--results-id-at-point)))
+    (if id
+        (merita--display-entry (merita--get id))
+      (message "No entry at point."))))
+
+(defun merita-results-edit ()
+  "Edit the entry at point."
+  (interactive)
+  (let ((id (merita--results-id-at-point)))
+    (if id
+        (merita-edit id)
+      (message "No entry at point."))))
+
+(defun merita-results-delete ()
+  "Delete the entry at point."
+  (interactive)
+  (let ((id (merita--results-id-at-point)))
+    (if id
+        (merita-delete id)
+      (message "No entry at point."))))
+
+;;; ** 4.6. Browse Mode
+
+;;;###autoload
+(defun merita-browse ()
+  "Browse all entries in a tabulated list."
+  (interactive)
+  (merita--ensure-db)
+  (let ((buf (get-buffer-create "*merita-browse*")))
+    (with-current-buffer buf
+      (merita-browse-mode)
+      (merita-browse--refresh))
+    (switch-to-buffer buf)))
+
+(defvar merita-browse-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'merita-browse-view)
+    (define-key map (kbd "e") #'merita-browse-export)
+    (define-key map (kbd "E") #'merita-browse-edit)
+    (define-key map (kbd "D") #'merita-browse-delete)
+    (define-key map (kbd "a") #'merita-browse-add)
+    (define-key map (kbd "d") #'merita-browse-add-doi)
+    (define-key map (kbd "b") #'merita-browse-open-url)
+    (define-key map (kbd "/") #'merita-browse-search)
+    (define-key map (kbd "m") #'merita-browse-metrics)
+    (define-key map (kbd "g") #'merita-browse-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `merita-browse-mode'.")
+
+(define-derived-mode merita-browse-mode tabulated-list-mode "Merita Browse"
+  "Major mode for browsing Merita entries.
+\\{merita-browse-mode-map}"
+  (setq tabulated-list-format
+        ;; Column order: Status, Type, Year, Month, Title, Authors, Journal, Pos, Cites
+        [("Status" 12 t)
+         ("Type" 18 t)
+         ("Year" 5 t)
+         ("Mo" 3 t)
+         ("Title" 40 t)
+         ("Authors" 28 t)
+         ("Journal" 22 t)
+         ("Pos" 6 t)
+         ("Cites" 6 (lambda (a b)
+                      (< (string-to-number (or (aref (cadr a) 8) "0"))
+                         (string-to-number (or (aref (cadr b) 8) "0")))))])
+  ;; Don't set tabulated-list-sort-key — SQL controls the order
+  (setq tabulated-list-padding 1)
+  (tabulated-list-init-header))
+
+(defun merita-browse--refresh ()
+  "Refresh the browse buffer from the database."
+  (interactive)
+  (merita--ensure-db)
+  (let ((entries (merita--query
+                  (format "SELECT id, status, type, year, month,
+                          title, authors, journal,
+                          author_position, citations
+                   FROM data
+                   ORDER BY %s DESC, %s DESC, %s DESC, id DESC"
+                          merita--sort-year-sql
+                          merita--sort-month-sql
+                          merita--sort-day-sql))))
+    (setq tabulated-list-entries
+          (mapcar (lambda (e)
+                    (let ((id (alist-get 'id e)))
+                      (list id
+                            (vector
+                             (or (alist-get 'status e) "")
+                             (or (alist-get 'type e) "")
+                             (format "%s" (or (alist-get 'year e) ""))
+                             (let ((m (alist-get 'month e)))
+                               (if (and m (> m 0)) (format "%d" m) ""))
+                             (merita--truncate (or (alist-get 'title e) "") 39)
+                             (merita--truncate (or (alist-get 'authors e) "") 27)
+                             (merita--truncate (or (alist-get 'journal e) "") 21)
+                             (or (alist-get 'author_position e) "")
+                             (let ((c (alist-get 'citations e)))
+                               (if (and c (> c 0)) (format "%d" c) ""))))))
+                  entries))
+    (tabulated-list-print t)
+    (message "%d entries." (length entries))))
+
+(defun merita-browse-refresh ()
+  "Refresh the browse view."
+  (interactive)
+  (merita-browse--refresh))
+
+(defun merita-browse--id-at-point ()
+  "Return the entry ID at point in the browse list."
+  (tabulated-list-get-id))
+
+(defun merita-browse-view ()
+  "View the entry at point."
+  (interactive)
+  (let ((id (merita-browse--id-at-point)))
+    (when id (merita--display-entry (merita--get id)))))
+
+(defun merita-browse-export ()
+  "Export the entry at point via the format dispatcher."
+  (interactive)
+  (let ((id (merita-browse--id-at-point)))
+    (when id (merita-export-entry id))))
+
+(defun merita-browse-edit ()
+  "Edit the entry at point."
+  (interactive)
+  (let ((id (merita-browse--id-at-point)))
+    (when id
+      (merita-edit id)
+      (merita-browse--refresh))))
+
+(defun merita-browse-delete ()
+  "Delete the entry at point."
+  (interactive)
+  (let ((id (merita-browse--id-at-point)))
+    (when id
+      (merita-delete id)
+      (merita-browse--refresh))))
+
+(defun merita-browse-add ()
+  "Add a new entry, then refresh the browse list."
+  (interactive)
+  (call-interactively #'merita-add)
+  (merita-browse--refresh))
+
+(defun merita-browse-add-doi ()
+  "Add an entry by DOI, then refresh the browse list."
+  (interactive)
+  (call-interactively #'merita-add-from-doi)
+  (merita-browse--refresh))
+
+(defun merita-browse-search ()
+  "Search from the browse view."
+  (interactive)
+  (call-interactively #'merita-search))
+
+(defun merita-browse-metrics ()
+  "Show metrics for the entry at point."
+  (interactive)
+  (let ((id (merita-browse--id-at-point)))
+    (when id
+      (if (fboundp 'merita-metrics-format-entry)
+          (message "%s" (merita-metrics-format-entry id))
+        (message "Metrics module not loaded.")))))
+
+(defun merita-browse-open-url ()
+  "Open the DOI or PMID of the entry at point in a browser."
+  (interactive)
+  (let ((id (merita-browse--id-at-point)))
+    (if id
+        (merita--open-url id)
+      (message "No entry at point."))))
+
+;;; * 5. Statistics
+
+;;; ** 5.1. H-Index
+
+;;;###autoload
+(defun merita-h-index ()
+  "Calculate and return the h-index from citation data."
+  (interactive)
+  (let* ((db (merita--ensure-db))
+         (cites (mapcar #'car
+                        (sqlite-select db
+                          "SELECT citations FROM data
+                           WHERE citations > 0
+                           ORDER BY citations DESC")))
+         (h 0))
+    (cl-loop for c in cites
+             for i from 1
+             while (>= c i)
+             do (setq h i))
+    (when (called-interactively-p 'any)
+      (message "h-index: %d" h))
+    h))
+
+;;; ** 5.2. Summary Dashboard
+
+;;;###autoload
+(defun merita-summary ()
+  "Display a comprehensive statistics dashboard."
+  (interactive)
+  (let* ((db (merita--ensure-db))
+         (total (merita--count))
+         (pr-total (merita-count-peer-reviewed-pubs))
+         (pr-where (merita--pr-where))
+         (buf (get-buffer-create "*merita-summary*"))
+         (lw   45)  ; label width (odd, matching odd-length title)
+         (bw   (+ 2 lw 1 4 1 4))  ; box inner width: indent + label + gaps + numbers
+         (hdr  (format "  %%-%ds %%4s %%4s\n" lw))
+         (row2 (format "  %%-%ds %%4d %%4d\n" lw))
+         (row1 (format "  %%-%ds      %%4d\n" lw))
+         (sep  (format "  %%-%ds %%4s %%4s\n" lw)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (let* ((title " MERITA — Career Summary ")
+               (pad (max 0 (- bw (length title))))
+               (lpad (/ pad 2))
+               (rpad (- pad lpad)))
+          (insert "╔" (make-string bw ?═) "╗\n")
+          (insert "║" (make-string lpad ?\s) title (make-string rpad ?\s) "║\n")
+          (insert "╚" (make-string bw ?═) "╝\n\n"))
+        ;; Key metrics
+        (insert (format row1 "Total entries" total))
+        (insert (format row1 "Peer-reviewed publications" pr-total))
+        (insert (format row1 "h-index" (merita-h-index)))
+        (let ((total-cites (or (caar (sqlite-select db
+                                       "SELECT SUM(citations) FROM data")) 0)))
+          (insert (format row1 "Total citations" total-cites)))
+        ;; Linked entries
+        (let ((link-count (or (caar (sqlite-select db
+                                      "SELECT COUNT(DISTINCT entry_id) FROM related_entries")) 0))
+              (rel-count (or (caar (sqlite-select db
+                                     "SELECT COUNT(*) / 2 FROM related_entries")) 0)))
+          (when (> rel-count 0)
+            (insert (format row1 "Entries with links" link-count))
+            (insert (format row1 "Linked entries" rel-count))))
+        ;; By type
+        (insert "\n── Type ──\n")
+        (let* ((by-type (sqlite-select db
+                          "SELECT type, COUNT(*) FROM data
+                           GROUP BY type ORDER BY COUNT(*) DESC"))
+               (sort-pr (eq merita-summary-sort-by 'pr))
+               (typed-rows
+                (mapcar (lambda (type-row)
+                          (let* ((etype (car type-row))
+                                 (all-n (cadr type-row))
+                                 (pr-n (caar (sqlite-select db
+                                               (format "SELECT COUNT(*) FROM data
+                                                        WHERE type = ? AND %s" pr-where)
+                                               (list etype)))))
+                            (list etype (or pr-n 0) all-n)))
+                        by-type)))
+          (when sort-pr
+            (setq typed-rows (sort typed-rows (lambda (a b) (> (nth 1 a) (nth 1 b))))))
+          (insert (format hdr "" "PR" "All"))
+          (insert (format sep "" "───" "───"))
+          (dolist (tr typed-rows)
+            (insert (format row2 (car tr) (nth 1 tr) (nth 2 tr)))))
+        ;; By status
+        (insert "\n── Status ──\n")
+        (insert (format hdr "" "PR" "All"))
+        (insert (format sep "" "───" "───"))
+        (let* ((by-status (sqlite-select db
+                            "SELECT status, COUNT(*) FROM data
+                             GROUP BY status ORDER BY COUNT(*) DESC"))
+               (sort-pr (eq merita-summary-sort-by 'pr))
+               (status-rows
+                (mapcar (lambda (s-row)
+                          (let* ((status (car s-row))
+                                 (all-n (cadr s-row))
+                                 (pr-n (caar (sqlite-select db
+                                               (format "SELECT COUNT(*) FROM data
+                                                        WHERE status = ? AND %s" pr-where)
+                                               (list status)))))
+                            (list status (or pr-n 0) all-n)))
+                        by-status)))
+          (when sort-pr
+            (setq status-rows (sort status-rows (lambda (a b) (> (nth 1 a) (nth 1 b))))))
+          (dolist (sr status-rows)
+            (insert (format row2 (car sr) (nth 1 sr) (nth 2 sr)))))
+        ;; Authorship (aggregate)
+        (insert "\n── Authorship ──\n")
+        (insert (format hdr "" "PR" "All"))
+        (insert (format sep "" "───" "───"))
+        (let* ((first-all (merita-count-first-author))
+               (first-pr (merita-count-first-author-pr))
+               (second-all (merita-count-second-author))
+               (second-pr (merita--count
+                           (format "%s AND author_position = 'second'" pr-where)))
+               (third-all (merita-count-third-author))
+               (third-pr (merita--count
+                          (format "%s AND author_position = 'third'" pr-where)))
+               (senior-all (merita-count-senior-author))
+               (senior-pr (merita--count
+                           (format "%s AND author_position IN ('senior','co-senior')"
+                                   pr-where)))
+               (sig-all (merita-count-significant-author))
+               (sig-pr (merita--count
+                        (format "%s AND author_position IN ('first','co-first','second','third','senior','co-senior','corresponding','sole')"
+                                pr-where))))
+          (insert (format row2 "First/co-first" first-pr first-all))
+          (insert (format row2 "Second" second-pr second-all))
+          (insert (format row2 "Third" third-pr third-all))
+          (insert (format row2 "Senior/co-senior" senior-pr senior-all))
+          (insert (format row2 "Significant (1st+2nd+3rd+Sr)" sig-pr sig-all)))
+        ;; By year
+        (insert "\n── Year ──\n")
+        (insert (format hdr "" "PR" "All"))
+        (insert (format sep "" "───" "───"))
+        (let ((by-year (sqlite-select db
+                         "SELECT CASE WHEN year IS NULL OR year = '' THEN 'n.d.' ELSE year END AS yr,
+                                 COUNT(*) FROM data
+                          GROUP BY yr ORDER BY
+                            CASE WHEN year IS NULL OR year = '' THEN 9999 ELSE year END DESC")))
+          (dolist (y-row by-year)
+            (let* ((yr (car y-row))
+                   (all-n (cadr y-row))
+                   (pr-n (caar (sqlite-select db
+                                 (format "SELECT COUNT(*) FROM data
+                                          WHERE CASE WHEN year IS NULL OR year = '' THEN 'n.d.' ELSE year END = ?
+                                          AND %s" pr-where)
+                                 (list yr)))))
+              (insert (format row2 yr (or pr-n 0) all-n)))))
+        ;; Most cited
+        (let ((most-cited (sqlite-select db
+                            "SELECT title, citations FROM data
+                             WHERE citations > 0
+                             ORDER BY citations DESC LIMIT 5")))
+          (when most-cited
+            (insert "\n── Most Cited ──\n")
+            (dolist (mc-row most-cited)
+              (insert (format "  [%4d] %s\n"
+                              (cadr mc-row)
+                              (merita--truncate (car mc-row) (- lw 8)))))))
+        ;; Top journals
+        (insert "\n── Top Journals ──\n")
+        (insert (format hdr "" "PR" "All"))
+        (insert (format sep "" "───" "───"))
+        (let* ((journals (sqlite-select db
+                           "SELECT COALESCE(NULLIF(journal_abbrev, ''), journal),
+                                   COUNT(*) FROM data
+                            WHERE journal IS NOT NULL
+                            GROUP BY COALESCE(NULLIF(journal_abbrev, ''), journal)
+                            ORDER BY COUNT(*) DESC LIMIT 10"))
+               (sort-pr (eq merita-summary-sort-by 'pr))
+               (journal-rows
+                (mapcar (lambda (j-row)
+                          (let* ((jname (car j-row))
+                                 (all-n (cadr j-row))
+                                 (pr-n (caar (sqlite-select db
+                                               (format "SELECT COUNT(*) FROM data
+                                                        WHERE COALESCE(NULLIF(journal_abbrev, ''), journal) = ?
+                                                        AND %s" pr-where)
+                                               (list jname)))))
+                            (list jname (or pr-n 0) all-n)))
+                        journals)))
+          (when sort-pr
+            (setq journal-rows (sort journal-rows (lambda (a b) (> (nth 1 a) (nth 1 b))))))
+          (dolist (jr journal-rows)
+            (insert (format row2 (merita--truncate (car jr) lw) (nth 1 jr) (nth 2 jr)))))
+        ;; Linked entries breakdown
+        (let ((by-rtype (sqlite-select db
+                          "SELECT relation_type, COUNT(*) / 2
+                           FROM related_entries
+                           GROUP BY relation_type
+                           ORDER BY COUNT(*) DESC")))
+          (when by-rtype
+            (insert "\n── Links ──\n")
+            (dolist (r-row by-rtype)
+              (insert (format row1 (car r-row) (cadr r-row))))))
+        (insert "\n")
+        (goto-char (point-min))
+        (special-mode)))
+    (pop-to-buffer buf)))
+
+;;; * 6. Import
+
+;;; ** 6.1. DOI Import (Crossref API)
+
+(defun merita--crossref-url (doi)
+  "Return the Crossref API URL for DOI."
+  (format "https://api.crossref.org/works/%s"
+          (url-hexify-string doi)))
+
+(defun merita--crossref-fetch (doi)
+  "Fetch metadata for DOI from Crossref.  Return parsed JSON."
+  (let* ((url (merita--crossref-url doi))
+         (url-request-extra-headers
+          (append '(("Accept" . "application/json"))
+                  (when merita-crossref-mailto
+                    `(("User-Agent" .
+                       ,(format "merita.el/0.1 (mailto:%s)"
+                                merita-crossref-mailto))))))
+         (buf (url-retrieve-synchronously url t t 30)))
+    (when buf
+      (unwind-protect
+          (with-current-buffer buf
+            (goto-char (point-min))
+            (re-search-forward "^$" nil t)
+            (let ((json-object-type 'alist)
+                  (json-array-type 'list)
+                  (json-key-type 'symbol))
+              (condition-case nil
+                  (json-read)
+                (json-error
+                 (user-error "Failed to parse Crossref response for DOI: %s" doi)))))
+        (kill-buffer buf)))))
+
+(defun merita--crossref-parse (data)
+  "Parse Crossref API response DATA into a Merita entry alist."
+  (let* ((message (alist-get 'message data))
+         (result '()))
+    (cl-flet ((add (key val) (when val (push (cons key val) result))))
+      (add 'title (car (alist-get 'title message)))
+      (let ((authors (alist-get 'author message)))
+        (when authors
+          (add 'authors
+               (mapconcat (lambda (a)
+                            (let ((family (alist-get 'family a))
+                                  (given (alist-get 'given a)))
+                              (if given (format "%s %s" family given) family)))
+                          authors ", "))
+          (add 'author_count (length authors))))
+      (let ((cr-type (alist-get 'type message)))
+        (add 'type
+             (pcase cr-type
+               ("journal-article" "journal-article")
+               ("book-chapter" "book-chapter")
+               ("book" "book")
+               ("proceedings-article" "conference-paper")
+               ("posted-content" "preprint")
+               ("report" "technical-report")
+               ("dissertation" "thesis-doctoral")
+               ("monograph" "book")
+               ("edited-book" "book")
+               ("review" "review-article")
+               (_ "journal-article"))))
+      (add 'journal (car (alist-get 'container-title message)))
+      (add 'journal_abbrev (car (alist-get 'short-container-title message)))
+      (let* ((issued (alist-get 'issued message))
+             (date-parts (car (alist-get 'date-parts issued))))
+        (when date-parts
+          (add 'year (nth 0 date-parts))
+          (when (nth 1 date-parts) (add 'month (nth 1 date-parts)))
+          (when (nth 2 date-parts) (add 'day (nth 2 date-parts)))))
+      (add 'volume (alist-get 'volume message))
+      (add 'issue (alist-get 'issue message))
+      (add 'pages (alist-get 'page message))
+      (add 'doi (alist-get 'DOI message))
+      (add 'url (alist-get 'URL message))
+      (add 'isbn (car (alist-get 'ISBN message)))
+      (add 'publisher (alist-get 'publisher message))
+      (let ((abstract (alist-get 'abstract message)))
+        (when abstract
+          (add 'abstract (replace-regexp-in-string "<[^>]+>" "" abstract))))
+      (let ((subjects (alist-get 'subject message)))
+        (when subjects
+          (add 'keywords (mapconcat #'identity subjects "; "))))
+      (let ((refs (alist-get 'is-referenced-by-count message)))
+        (when (and refs (> refs 0)) (add 'citations refs)))
+      (add 'status "published"))
+    result))
+
+;;;###autoload
+(defun merita-add-from-doi (doi)
+  "Add an entry by fetching metadata from Crossref for DOI."
+  (interactive "sDOI: ")
+  (setq doi (replace-regexp-in-string "^https?://doi\\.org/" "" doi))
+  (when (merita--get-by-doi doi)
+    (user-error "Entry with DOI %s already exists" doi))
+  (message "Fetching metadata for %s..." doi)
+  (let* ((data (merita--crossref-fetch doi))
+         (entry (merita--crossref-parse data)))
+    (unless entry (user-error "No metadata found for DOI: %s" doi))
+    (message "Found: %s (%s) %s, %s"
+             (or (alist-get 'authors entry) "?")
+             (or (alist-get 'year entry) "?")
+             (or (alist-get 'title entry) "?")
+             (or (alist-get 'journal entry) "?"))
+    (let ((position (merita--read-author-position)))
+      (push (cons 'author_position (symbol-name position)) entry))
+    (let ((peer-reviewed (y-or-n-p "Peer-reviewed? ")))
+      (push (cons 'peer_reviewed (if peer-reviewed 1 0)) entry))
+    (when (y-or-n-p "Add impact factor? ")
+      (let ((if-val (merita--read-number-field "Impact factor")))
+        (when if-val (push (cons 'impact_factor if-val) entry))))
+    (let ((id (merita--insert entry)))
+      (message "Added entry #%d: %s" id (alist-get 'title entry))
+      (when (y-or-n-p "View entry? ")
+        (merita--display-entry (merita--get id)))
+      id)))
+
+;;;###autoload
+(defun merita-add-from-doi-batch ()
+  "Add multiple entries by DOI.  Empty input finishes."
+  (interactive)
+  (let ((count 0))
+    (catch 'done
+      (while t
+        (let ((doi (read-string (format "DOI #%d (empty to finish): " (1+ count)))))
+          (if (string-empty-p doi) (throw 'done nil)
+            (condition-case err
+                (progn (merita-add-from-doi doi) (cl-incf count))
+              (error (message "Error adding %s: %s" doi (error-message-string err))))))))
+    (message "Added %d entries." count)))
+
+;;; ** 6.2. BibTeX Import
+
+(defun merita--bibtex-type-to-merita (bibtex-type)
+  "Map BIBTEX-TYPE string to a Merita entry type symbol."
+  (pcase (downcase bibtex-type)
+    ("article" 'journal-article)
+    ("book" 'book)
+    ("incollection" 'book-chapter)
+    ("inbook" 'book-chapter)
+    ("inproceedings" 'conference-paper)
+    ("conference" 'conference-paper)
+    ("phdthesis" 'thesis-doctoral)
+    ("mastersthesis" 'thesis-masters)
+    ("techreport" 'technical-report)
+    ("unpublished" 'preprint)
+    ("misc" 'other)
+    (_ 'other)))
+
+(defun merita--parse-bibtex-file (filename)
+  "Parse a BibTeX file at FILENAME.  Returns list of alists."
+  (if (require 'parsebib nil t)
+      (merita--parse-bibtex-with-parsebib filename)
+    (merita--parse-bibtex-builtin filename)))
+
+(declare-function parsebib-parse "parsebib")
+
+(defun merita--parse-bibtex-with-parsebib (filename)
+  "Parse FILENAME using parsebib."
+  (let* ((entries (parsebib-parse filename))
+         (result '()))
+    (maphash (lambda (key entry)
+               (let ((alist (merita--convert-parsebib-entry key entry)))
+                 (when alist (push alist result))))
+             entries)
+    (nreverse result)))
+
+(defun merita--convert-parsebib-entry (key entry)
+  "Convert a parsebib ENTRY with KEY to a Merita alist."
+  (let ((result '())
+        (bib-type (gethash "=type=" entry)))
+    (cl-flet ((add (merita-field bib-field)
+                (let ((val (gethash bib-field entry)))
+                  (when (and val (not (string-empty-p val)))
+                    (push (cons merita-field val) result)))))
+      (push (cons 'type
+                   (symbol-name (merita--bibtex-type-to-merita (or bib-type "misc"))))
+            result)
+      (add 'title "title") (add 'authors "author") (add 'journal "journal")
+      (add 'volume "volume") (add 'issue "number") (add 'pages "pages")
+      (add 'doi "doi") (add 'url "url") (add 'publisher "publisher")
+      (add 'edition "edition") (add 'editors "editor")
+      (add 'book_title "booktitle") (add 'isbn "isbn") (add 'series "series")
+      (add 'school "school") (add 'organization "institution")
+      (add 'abstract "abstract") (add 'keywords "keywords") (add 'notes "note")
+      (let ((year (gethash "year" entry)))
+        (when year (push (cons 'year (string-to-number year)) result)))
+      (let ((month (gethash "month" entry)))
+        (when month
+          (let ((num (merita--parse-month month)))
+            (when num (push (cons 'month num) result)))))
+      (let ((day (gethash "day" entry)))
+        (when day (push (cons 'day (string-to-number day)) result)))
+      (push (cons 'bibtex_key key) result)
+      (push (cons 'bibtex_type (or bib-type "misc")) result)
+      (push (cons 'status "published") result))
+    result))
+
+(defun merita--parse-bibtex-builtin (filename)
+  "Simple built-in BibTeX parser for FILENAME."
+  (let ((entries '()))
+    (with-temp-buffer
+      (insert-file-contents filename)
+      (goto-char (point-min))
+      (while (re-search-forward "@\\([a-zA-Z]+\\){\\s-*\\([^,]+\\)," nil t)
+        (let* ((bib-type (match-string 1))
+               (key (string-trim (match-string 2)))
+               (start (point))
+               (fields '()))
+          (unless (member (downcase bib-type) '("string" "comment" "preamble"))
+            (backward-char)
+            (when (condition-case nil (progn (forward-sexp 1) t) (scan-error nil))
+              (let ((field-text (buffer-substring-no-properties start (1- (point)))))
+                (with-temp-buffer
+                  (insert field-text)
+                  (goto-char (point-min))
+                  (while (re-search-forward "\\([a-zA-Z_-]+\\)\\s-*=\\s-*" nil t)
+                    (let ((field-name (downcase (match-string 1)))
+                          (value (merita--bibtex-read-value)))
+                      (when value (push (cons field-name value) fields))))))
+              (let ((entry (merita--bibtex-fields-to-merita bib-type key (nreverse fields))))
+                (when entry (push entry entries))))))))
+    (nreverse entries)))
+
+(defun merita--bibtex-read-value ()
+  "Read a BibTeX field value at point."
+  (skip-chars-forward " \t\n")
+  (cond
+   ((looking-at "{")
+    (let ((start (1+ (point))))
+      (condition-case nil
+          (progn (forward-sexp 1)
+                 (let ((val (buffer-substring-no-properties start (1- (point)))))
+                   (skip-chars-forward " \t\n,") val))
+        (scan-error nil))))
+   ((looking-at "\"")
+    (let ((start (1+ (point))))
+      (forward-char 1)
+      (when (search-forward "\"" nil t)
+        (let ((val (buffer-substring-no-properties start (1- (point)))))
+          (skip-chars-forward " \t\n,") val))))
+   ((looking-at "[a-zA-Z0-9]+")
+    (let ((val (match-string 0)))
+      (goto-char (match-end 0))
+      (skip-chars-forward " \t\n,") val))
+   (t nil)))
+
+(defun merita--bibtex-fields-to-merita (bib-type key fields)
+  "Convert BibTeX FIELDS alist with BIB-TYPE and KEY to Merita alist."
+  (let ((result '()))
+    (cl-flet ((add (merita-field bib-field)
+                (let ((val (cdr (assoc bib-field fields))))
+                  (when (and val (not (string-empty-p val)))
+                    (push (cons merita-field val) result))))
+              (get (field) (cdr (assoc field fields))))
+      (push (cons 'type
+                   (symbol-name (merita--bibtex-type-to-merita bib-type)))
+            result)
+      (add 'title "title") (add 'authors "author") (add 'journal "journal")
+      (add 'volume "volume") (add 'issue "number") (add 'pages "pages")
+      (add 'doi "doi") (add 'url "url") (add 'publisher "publisher")
+      (add 'edition "edition") (add 'editors "editor")
+      (add 'book_title "booktitle") (add 'isbn "isbn") (add 'series "series")
+      (add 'school "school") (add 'organization "institution")
+      (add 'abstract "abstract") (add 'keywords "keywords") (add 'notes "note")
+      (let ((year (get "year")))
+        (when year (push (cons 'year (string-to-number year)) result)))
+      (let ((month (get "month")))
+        (when month
+          (let ((num (merita--parse-month month)))
+            (when num (push (cons 'month num) result)))))
+      (push (cons 'bibtex_key key) result)
+      (push (cons 'bibtex_type bib-type) result)
+      (push (cons 'status "published") result))
+    result))
+
+(defun merita--parse-month (month-str)
+  "Parse MONTH-STR to integer 1-12, or nil."
+  (let ((m (downcase (string-trim month-str))))
+    (cond
+     ((string-match-p "^[0-9]+$" m) (string-to-number m))
+     ((string-prefix-p "jan" m) 1)  ((string-prefix-p "feb" m) 2)
+     ((string-prefix-p "mar" m) 3)  ((string-prefix-p "apr" m) 4)
+     ((string-prefix-p "may" m) 5)  ((string-prefix-p "jun" m) 6)
+     ((string-prefix-p "jul" m) 7)  ((string-prefix-p "aug" m) 8)
+     ((string-prefix-p "sep" m) 9)  ((string-prefix-p "oct" m) 10)
+     ((string-prefix-p "nov" m) 11) ((string-prefix-p "dec" m) 12)
+     (t nil))))
+
+;;;###autoload
+(defun merita-import-bibtex (filename)
+  "Import entries from a BibTeX FILENAME.  Duplicate DOIs are skipped."
+  (interactive "fBibTeX file: ")
+  (let* ((entries (merita--parse-bibtex-file filename))
+         (imported 0) (skipped 0))
+    (dolist (entry entries)
+      (let ((doi (alist-get 'doi entry)))
+        (if (and doi (merita--get-by-doi doi))
+            (progn (cl-incf skipped)
+                   (message "Skipping duplicate DOI: %s" doi))
+          (let ((id (merita--insert entry)))
+            (cl-incf imported)
+            (message "Imported #%d: %s" id (or (alist-get 'title entry) "Untitled"))))))
+    (message "BibTeX import: %d imported, %d skipped" imported skipped)
+    (when (and (> imported 0)
+               (y-or-n-p "Annotate author positions for imported entries? "))
+      (merita-annotate-author-positions))))
+
+;;; ** 6.3. CSV/TSV Import
+
+(defun merita--parse-delimited-file (filename separator)
+  "Parse a delimited FILENAME with SEPARATOR.  Returns list of alists."
+  (let ((entries '()))
+    (with-temp-buffer
+      (insert-file-contents filename)
+      (goto-char (point-min))
+      (let* ((header-line (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position)))
+             (columns (mapcar #'string-trim
+                              (split-string header-line separator)))
+             (col-syms (mapcar #'intern columns)))
+        (forward-line 1)
+        (while (not (eobp))
+          (let* ((line (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position))))
+            (unless (string-empty-p (string-trim line))
+              (let* ((values (split-string line separator))
+                     (alist '()))
+                (cl-loop for col in col-syms
+                         for val in values
+                         do (let ((trimmed (string-trim val)))
+                              (unless (string-empty-p trimmed)
+                                (push (cons col
+                                            (if (and (memq col '(id year month
+                                                                 citations altmetric
+                                                                 author_count
+                                                                 peer_reviewed))
+                                                     (string-match-p "^-?[0-9]+$" trimmed))
+                                                (string-to-number trimmed)
+                                              (if (and (memq col '(impact_factor
+                                                                   grant_amount))
+                                                       (string-match-p "^-?[0-9.]+$" trimmed))
+                                                  (string-to-number trimmed)
+                                                trimmed)))
+                                      alist))))
+                (when alist (push (nreverse alist) entries)))))
+          (forward-line 1))))
+    (nreverse entries)))
+
+;;;###autoload
+(defun merita-import-csv (filename)
+  "Import entries from a CSV FILENAME."
+  (interactive "fCSV file: ")
+  (merita--import-delimited filename ","))
+
+;;;###autoload
+(defun merita-import-tsv (filename)
+  "Import entries from a TSV FILENAME."
+  (interactive "fTSV file: ")
+  (merita--import-delimited filename "\t"))
+
+(defun merita--import-delimited (filename separator)
+  "Import entries from delimited FILENAME with SEPARATOR."
+  (let* ((entries (merita--parse-delimited-file filename separator))
+         (imported 0) (skipped 0))
+    (dolist (entry entries)
+      (let ((clean (cl-remove-if
+                    (lambda (pair)
+                      (memq (car pair) '(id date_added date_modified)))
+                    entry))
+            (doi (alist-get 'doi entry)))
+        (if (and doi (merita--get-by-doi doi))
+            (progn (cl-incf skipped)
+                   (message "Skipping duplicate DOI: %s" doi))
+          (condition-case err
+              (progn
+                (merita--insert clean)
+                (cl-incf imported))
+            (error (message "Error importing row: %s" (error-message-string err))
+                   (cl-incf skipped))))))
+    (message "%s import: %d imported, %d skipped"
+             (if (equal separator ",") "CSV" "TSV")
+             imported skipped)))
+
+;;; ** 6.4. Author Position Annotation
+
+;;;###autoload
+(defun merita-annotate-author-positions ()
+  "Walk through entries missing author positions and annotate them."
+  (interactive)
+  (let* ((entries (merita--query
+                   "SELECT id, title, authors, author_position FROM data
+                    WHERE author_position IS NULL
+                    ORDER BY year DESC"))
+         (count 0)
+         (total (length entries)))
+    (if (null entries)
+        (message "All entries have author positions annotated.")
+      (dolist (entry entries)
+        (cl-incf count)
+        (let* ((id (alist-get 'id entry))
+               (title (alist-get 'title entry))
+               (authors (alist-get 'authors entry)))
+          (message "[%d/%d] %s\n  Authors: %s"
+                   count total
+                   (merita--truncate (or title "Untitled") 60)
+                   (or authors "Unknown"))
+          (let ((position (merita--read-author-position)))
+            (merita--update id (list (cons 'author_position
+                                          (symbol-name position)))))))
+      (message "Annotated %d entries." total))))
+
+;;; ** 6.5. ORCID Import
+
+(defgroup merita-orcid nil
+  "ORCID integration for Merita."
+  :group 'merita
+  :prefix "merita-orcid-")
+
+(defcustom merita-orcid-id nil
+  "ORCID iD for the researcher (format: 0000-0000-0000-0000)."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'merita-orcid)
+
+(defcustom merita-orcid-auto-position nil
+  "If non-nil, skip author position prompts during ORCID import.
+When set to a symbol from `merita-author-positions', that position
+is assigned to all imported entries without prompting."
+  :type '(choice (const :tag "Prompt for each entry" nil)
+                 (symbol :tag "Default position"))
+  :group 'merita-orcid)
+
+(defconst merita-orcid--api-url "https://pub.orcid.org/v3.0"
+  "Base URL for the ORCID public API.")
+
+(defun merita-orcid--fetch-works (orcid-id)
+  "Fetch the public works list for ORCID-ID."
+  (let* ((url (format "%s/%s/works" merita-orcid--api-url orcid-id))
+         (url-request-extra-headers
+          '(("Accept" . "application/json")
+            ("User-Agent" . "merita.el/0.2 (Emacs; academic CV tool)")))
+         (url-show-status nil))
+    (condition-case err
+        (with-current-buffer (url-retrieve-synchronously url t nil 30)
+          (goto-char (point-min))
+          (prog1
+              (when (re-search-forward "\n\n" nil t)
+                (let ((json-object-type 'alist)
+                      (json-array-type 'vector)
+                      (json-key-type 'symbol))
+                  (condition-case nil
+                      (json-read)
+                    (json-error nil))))
+            (kill-buffer)))
+      (error
+       (message "merita-orcid: failed to fetch works for %s: %s"
+                orcid-id err)
+       nil))))
+
+(defun merita-orcid--extract-works (data)
+  "Extract a list of works from ORCID API response DATA."
+  (let ((groups (cdr (assq 'group data)))
+        (results '()))
+    (when (vectorp groups)
+      (seq-doseq (group groups)
+        (let* ((summaries (cdr (assq 'work-summary group)))
+               (summary (when (vectorp summaries) (aref summaries 0))))
+          (when summary
+            (let* ((title-obj (cdr (assq 'title summary)))
+                   (title-val (cdr (assq 'value (cdr (assq 'title title-obj)))))
+                   (journal-obj (cdr (assq 'journal-title summary)))
+                   (journal-val (cdr (assq 'value journal-obj)))
+                   (pub-date (cdr (assq 'publication-date summary)))
+                   (year-obj (cdr (assq 'year pub-date)))
+                   (year-val (cdr (assq 'value year-obj)))
+                   (month-obj (cdr (assq 'month pub-date)))
+                   (month-val (cdr (assq 'value month-obj)))
+                   (day-obj (cdr (assq 'day pub-date)))
+                   (day-val (cdr (assq 'value day-obj)))
+                   (type (cdr (assq 'type summary)))
+                   (ext-ids (cdr (assq 'external-ids summary)))
+                   (ext-id-list (cdr (assq 'external-id ext-ids)))
+                   (doi nil))
+              (when (vectorp ext-id-list)
+                (seq-doseq (eid ext-id-list)
+                  (when (equal (cdr (assq 'external-id-type eid)) "doi")
+                    (setq doi (cdr (assq 'external-id-value eid))))))
+              (push (list (cons 'doi doi)
+                          (cons 'title title-val)
+                          (cons 'journal journal-val)
+                          (cons 'year (when year-val
+                                        (string-to-number year-val)))
+                          (cons 'month (when month-val
+                                         (string-to-number month-val)))
+                          (cons 'day (when day-val
+                                       (string-to-number day-val)))
+                          (cons 'orcid-type type))
+                    results))))))
+    (nreverse results)))
+
+(defun merita-orcid--classify-type (orcid-type)
+  "Map ORCID work type string to a Merita entry type symbol."
+  (pcase (downcase (or orcid-type ""))
+    ("journal-article" 'journal-article)
+    ("book-review" 'review-article)
+    ("book" 'book)
+    ("book-chapter" 'book-chapter)
+    ("conference-paper" 'conference-paper)
+    ("conference-abstract" 'abstract)
+    ("conference-poster" 'poster)
+    ("dissertation" 'thesis-doctoral)
+    ("dissertation-thesis" 'thesis-doctoral)
+    ("edited-book" 'book)
+    ("encyclopedia-entry" 'book-chapter)
+    ("letter" 'letter)
+    ("magazine-article" 'other)
+    ("manual" 'technical-report)
+    ("online-resource" 'other)
+    ("patent" 'patent)
+    ("preprint" 'preprint)
+    ("report" 'technical-report)
+    ("research-technique" 'other)
+    ("review" 'review-article)
+    ("supervised-student-publication" 'journal-article)
+    ("test" 'other)
+    ("translation" 'other)
+    ("working-paper" 'preprint)
+    (_ 'other)))
+
+;;;###autoload
+(defun merita-import-orcid (&optional orcid-id)
+  "Import publications from ORCID into Merita.
+Fetches the public works list for ORCID-ID (defaults to
+`merita-orcid-id'), identifies DOIs not yet in the database,
+and imports them via Crossref."
+  (interactive
+   (list (or merita-orcid-id
+             (read-string "ORCID iD (0000-0000-0000-0000): "))))
+  (unless orcid-id
+    (user-error "No ORCID iD provided; set `merita-orcid-id' or pass one interactively"))
+  (unless (string-match-p "^[0-9]\\{4\\}-[0-9]\\{4\\}-[0-9]\\{4\\}-[0-9X]\\{4\\}$" orcid-id)
+    (user-error "Invalid ORCID iD format: %s (expected 0000-0000-0000-0000)" orcid-id))
+  (merita--ensure-db)
+  (message "Fetching works from ORCID %s..." orcid-id)
+  (let* ((data (merita-orcid--fetch-works orcid-id))
+         (works (when data (merita-orcid--extract-works data))))
+    (unless works
+      (user-error "No works found for ORCID %s (or the record is not public)" orcid-id))
+    (let ((new-dois '())
+          (existing '())
+          (no-doi '()))
+      (dolist (work works)
+        (let ((doi (alist-get 'doi work)))
+          (cond
+           ((or (null doi) (string-empty-p doi))
+            (push work no-doi))
+           ((merita--get-by-doi doi)
+            (push work existing))
+           (t
+            (push work new-dois)))))
+      (setq new-dois (nreverse new-dois)
+            existing (nreverse existing)
+            no-doi (nreverse no-doi))
+      (message "ORCID %s: %d works total — %d new, %d existing, %d without DOI"
+               orcid-id (length works)
+               (length new-dois) (length existing) (length no-doi))
+      (if (null new-dois)
+          (message "All works with DOIs are already in the database.")
+        (merita-orcid--preview-import new-dois no-doi existing)
+        (when (yes-or-no-p
+               (format "Import %d new entries from ORCID? " (length new-dois)))
+          (merita-orcid--do-import new-dois))))))
+
+(defun merita-orcid--preview-import (new-dois no-doi existing)
+  "Display a preview buffer of NEW-DOIS, NO-DOI, and EXISTING works."
+  (let ((buf (get-buffer-create "*merita-orcid-preview*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "ORCID Import Preview\n%s\n\n"
+                        (make-string 50 ?─)))
+        (insert (format "Will import (%d):\n" (length new-dois)))
+        (dolist (w new-dois)
+          (insert (format "  + [%s] %s\n    %s — %s\n"
+                          (or (alist-get 'year w) "?")
+                          (or (alist-get 'title w) "Untitled")
+                          (or (alist-get 'doi w) "")
+                          (or (alist-get 'journal w) ""))))
+        (when no-doi
+          (insert (format "\nSkipping — no DOI (%d):\n" (length no-doi)))
+          (dolist (w no-doi)
+            (insert (format "  - [%s] %s\n"
+                            (or (alist-get 'year w) "?")
+                            (or (alist-get 'title w) "Untitled")))))
+        (when existing
+          (insert (format "\nAlready in database (%d):\n" (length existing)))
+          (dolist (w existing)
+            (insert (format "  = [%s] %s\n"
+                            (or (alist-get 'year w) "?")
+                            (or (alist-get 'title w) "Untitled")))))
+        (goto-char (point-min))
+        (special-mode)))
+    (display-buffer buf)))
+
+(defun merita-orcid--do-import (works)
+  "Import WORKS via Crossref.  Falls back to stubs for missing metadata."
+  (let ((imported 0)
+        (failed 0)
+        (total (length works)))
+    (dolist (work works)
+      (let ((doi (alist-get 'doi work))
+            (title (or (alist-get 'title work) "Untitled")))
+        (condition-case err
+            (progn
+              (message "[%d/%d] Importing: %s..." (+ imported failed 1) total title)
+              (let* ((data (merita--crossref-fetch doi))
+                     (entry (merita--crossref-parse data)))
+                (if entry
+                    (progn
+                      (let ((position
+                             (if merita-orcid-auto-position
+                                 (symbol-name merita-orcid-auto-position)
+                               (progn
+                                 (message "  %s (%s) — %s"
+                                          (or (alist-get 'authors entry) "?")
+                                          (or (alist-get 'year entry) "?")
+                                          title)
+                                 (symbol-name (merita--read-author-position))))))
+                        (push (cons 'author_position position) entry))
+                      (push (cons 'peer_reviewed 1) entry)
+                      (merita--insert entry)
+                      (cl-incf imported))
+                  (let* ((orcid-type (alist-get 'orcid-type work))
+                         (stub (list (cons 'type
+                                           (symbol-name
+                                            (merita-orcid--classify-type orcid-type)))
+                                     (cons 'title title)
+                                     (cons 'doi doi)
+                                     (cons 'journal (alist-get 'journal work))
+                                     (cons 'year (alist-get 'year work))
+                                     (cons 'status "published"))))
+                    (let ((position
+                           (if merita-orcid-auto-position
+                               (symbol-name merita-orcid-auto-position)
+                             (progn
+                               (message "  [stub — no Crossref data] %s" title)
+                               (symbol-name (merita--read-author-position))))))
+                      (push (cons 'author_position position) stub))
+                    (merita--insert stub)
+                    (cl-incf imported)
+                    (message "  (imported as stub — Crossref had no data for %s)" doi)))))
+          (error
+           (cl-incf failed)
+           (message "  Error importing %s: %s" doi (error-message-string err))))))
+    (message "ORCID import complete: %d imported, %d failed" imported failed)))
+
+;;;###autoload
+(defun merita-orcid-diff ()
+  "Show works on ORCID that are not yet in the database."
+  (interactive)
+  (let ((orcid-id (or merita-orcid-id
+                      (read-string "ORCID iD: "))))
+    (unless orcid-id
+      (user-error "No ORCID iD provided"))
+    (merita--ensure-db)
+    (message "Fetching works from ORCID %s..." orcid-id)
+    (let* ((data (merita-orcid--fetch-works orcid-id))
+           (works (when data (merita-orcid--extract-works data)))
+           (missing '()))
+      (unless works
+        (user-error "No works found for ORCID %s" orcid-id))
+      (dolist (w works)
+        (let ((doi (alist-get 'doi w)))
+          (when (or (null doi) (string-empty-p doi)
+                    (not (merita--get-by-doi doi)))
+            (push w missing))))
+      (if (null missing)
+          (message "Database is in sync with ORCID — no missing works.")
+        (merita-orcid--preview-import
+         (cl-remove-if (lambda (w)
+                         (let ((d (alist-get 'doi w)))
+                           (or (null d) (string-empty-p d))))
+                       missing)
+         (cl-remove-if-not (lambda (w)
+                             (let ((d (alist-get 'doi w)))
+                               (or (null d) (string-empty-p d))))
+                           missing)
+         nil)
+        (message "%d works not in database." (length missing))))))
+
+;;; * 7. Export
+
+;;; ** 7.1. LaTeX Export
+
+;;; *** 7.1.1. LaTeX Customization
+
+(defcustom merita-latex-section-order
+  '(journal-article review-article book book-chapter
+    editorial letter case-report conference-paper
+    podium invited-talk keynote poster abstract
+    thesis-doctoral thesis-masters grant award
+    software dataset)
+  "Order in which entry types appear in LaTeX CV export."
+  :type '(repeat symbol)
+  :group 'merita)
+
+(defcustom merita-latex-section-titles
+  '((journal-article  . "Peer-Reviewed Journal Articles")
+    (review-article   . "Review Articles")
+    (book             . "Books")
+    (book-chapter     . "Book Chapters")
+    (editorial        . "Editorials \\& Commentaries")
+    (letter           . "Letters to the Editor")
+    (case-report      . "Case Reports")
+    (conference-paper . "Conference Papers")
+    (podium           . "Podium Presentations")
+    (invited-talk     . "Invited Lectures")
+    (keynote          . "Keynote Addresses")
+    (poster           . "Poster Presentations")
+    (abstract         . "Published Abstracts")
+    (thesis-doctoral  . "Doctoral Dissertation")
+    (thesis-masters   . "Master's Thesis")
+    (preprint         . "Preprints")
+    (technical-report . "Technical Reports")
+    (grant            . "Funded Grants")
+    (award            . "Awards \\& Honors")
+    (patent           . "Patents")
+    (dataset          . "Published Datasets")
+    (software         . "Software")
+    (workshop         . "Workshops")
+    (media            . "Media")
+    (other            . "Other"))
+  "Alist mapping entry types to LaTeX section titles."
+  :type '(alist :key-type symbol :value-type string)
+  :group 'merita)
+
+(defcustom merita-latex-preamble
+  "%% Generated by Merita (https://codeberg.org/phmcc/merita)
+%% Date: %s
+%%
+%% Include this file in a CV with: \\input{publications.tex}
+%% Requires: \\usepackage{enumitem} for list formatting
+
+"
+  "Preamble template for LaTeX export.  %s is replaced with timestamp."
+  :type 'string
+  :group 'merita)
+
+(defcustom merita-latex-enumerate-style t
+  "If non-nil, use numbered enumerate environment."
+  :type 'boolean
+  :group 'merita)
+
+(defcustom merita-latex-reverse-numbering t
+  "If non-nil, number publications in reverse chronological order."
+  :type 'boolean
+  :group 'merita)
+
+;;; *** 7.1.2. Unified Text Helpers
+;;
+;; All citation formatters use these context-aware helpers.
+;; `merita--latex-context' is bound to t by LaTeX export functions;
+;; when nil, output is plain text.
+
+(defvar merita--latex-context nil
+  "Non-nil when formatters are producing LaTeX output.
+Set dynamically by export functions.  Controls whether helpers
+emit LaTeX markup or plain text.")
+
+(defun merita--emphasize-name (author-string)
+  "Emphasize the user's name in AUTHOR-STRING.
+In LaTeX context, wraps in \\textbf{}.  In plain text, uses ALL CAPS.
+Matches longest names first; skips variants that are substrings
+of already-matched longer names."
+  (if (and merita-latex-bold-author merita-user-name)
+      (let* ((all-names (cons merita-user-name
+                              (or merita-user-name-variants '())))
+             (sorted (sort (copy-sequence all-names)
+                           (lambda (a b) (> (length a) (length b)))))
+             (matched '())
+             (result author-string))
+        (dolist (name sorted)
+          (unless (cl-some (lambda (m) (string-match-p (regexp-quote name) m))
+                           matched)
+            (when (string-match-p (regexp-quote name) result)
+              (setq result (replace-regexp-in-string
+                            (regexp-quote name)
+                            (if merita--latex-context
+                                (format "\\textbf{%s}" name)
+                              (upcase name))
+                            result t t))
+              (push name matched))))
+        result)
+    author-string))
+
+(defun merita--escape (str)
+  "Escape STR for the current output context.
+In LaTeX context, escapes special characters.  In plain text, identity."
+  (if (and merita--latex-context str)
+      (merita--latex-escape str)
+    (or str "")))
+
+(defun merita--emph (str)
+  "Italicize STR (e.g., journal name) for the current output context.
+In LaTeX context, wraps in \\emph{}.  In plain text, returns as-is."
+  (if (and merita--latex-context str)
+      (format "\\emph{%s}" (merita--latex-escape str))
+    (or str "")))
+
+(defun merita--mono (str)
+  "Monospace STR (e.g., package name) for the current output context.
+In LaTeX context, wraps in \\texttt{}.  In plain text, returns as-is."
+  (if (and merita--latex-context str)
+      (format "\\texttt{%s}" (merita--latex-escape str))
+    (or str "")))
+
+(defun merita--href (url)
+  "Format URL for the current output context.
+In LaTeX context, wraps in \\url{}.  In plain text, returns as-is."
+  (if (and merita--latex-context url)
+      (format "\\url{%s}" url)
+    (or url "")))
+
+(defun merita--fmt-doi (doi)
+  "Format DOI for the current output context."
+  (when doi
+    (if merita--latex-context
+        (format "doi: %s" doi)
+      (format "https://doi.org/%s" doi))))
+
+(defun merita--latex-escape (str)
+  "Escape special LaTeX characters in STR."
+  (when str
+    (let ((result str))
+      (dolist (pair '(("\\\\" . "\\textbackslash{}")
+                      ("&" . "\\&") ("%" . "\\%") ("\\$" . "\\$")
+                      ("#" . "\\#") ("_" . "\\_") ("{" . "\\{")
+                      ("}" . "\\}") ("~" . "\\textasciitilde{}")
+                      ("\\^" . "\\textasciicircum{}")))
+        (setq result (replace-regexp-in-string (car pair) (cdr pair) result t t)))
+      result)))
+
+(defun merita-format-vancouver (entry)
+  "Format ENTRY in Vancouver (medical) citation style.
+Uses unified helpers; works in both LaTeX and plain text contexts."
+  (let* ((authors (alist-get 'authors entry))
+         (title (alist-get 'title entry))
+         (journal (alist-get 'journal entry))
+         (journal-abbrev (alist-get 'journal_abbrev entry))
+         (year (alist-get 'year entry))
+         (volume (alist-get 'volume entry))
+         (issue (alist-get 'issue entry))
+         (pages (alist-get 'pages entry))
+         (doi (alist-get 'doi entry))
+         (book-title (alist-get 'book_title entry))
+         (publisher (alist-get 'publisher entry))
+         (editors (alist-get 'editors entry))
+         (conference (alist-get 'conference entry))
+         (location (alist-get 'conference_location entry))
+         (conf-date (alist-get 'conference_date entry))
+         (school (alist-get 'school entry))
+         (entry-type (intern (or (alist-get 'type entry) "other")))
+         (parts '()))
+    (when authors
+      (push (format "%s." (merita--emphasize-name (merita--escape authors))) parts))
+    (when title
+      (push (format "%s." (merita--escape title)) parts))
+    (pcase entry-type
+      ((or 'journal-article 'review-article 'editorial 'letter 'case-report 'abstract)
+       (when (or journal-abbrev journal)
+         (push (format "%s." (merita--emph (or journal-abbrev journal))) parts))
+       (when year
+         (let ((vol-str (cond
+                         ((and volume issue) (format "%s;%s(%s)" year volume issue))
+                         (volume (format "%s;%s" year volume))
+                         (t (format "%s" year)))))
+           (push (if pages (format "%s:%s." vol-str pages) (format "%s." vol-str)) parts))))
+      ('book-chapter
+       (when book-title
+         (push (format "In: %s%s"
+                       (if editors
+                           (format "%s, ed%s. " (merita--escape editors)
+                                   (if (string-match-p "," (or editors "")) "s" ""))
+                         "")
+                       (format "%s." (merita--emph book-title)))
+               parts))
+       (when publisher (push (format "%s;" (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts))
+       (when pages (push (format "p. %s." pages) parts)))
+      ('book
+       (when publisher (push (format "%s;" (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts)))
+      ('conference-paper
+       (when book-title (push (format "In: %s." (merita--emph book-title)) parts))
+       (when publisher (push (format "%s;" (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts))
+       (when pages (push (format "p. %s." pages) parts)))
+      ((or 'podium 'poster 'invited-talk 'keynote 'workshop)
+       (when conference
+         (push (format "Presented at %s." (merita--escape conference)) parts))
+       (when location (push (format "%s." (merita--escape location)) parts))
+       (when (or conf-date year) (push (format "%s." (or conf-date year)) parts))
+       (let ((extra (merita--get-presentations (alist-get 'id entry))))
+         (when extra
+           (push "Also presented at:" parts)
+           (dolist (pres extra)
+             (let ((p-parts '()))
+               (push (merita--escape (alist-get 'conference pres)) p-parts)
+               (let ((p-loc (alist-get 'location pres)))
+                 (when p-loc (push (merita--escape p-loc) p-parts)))
+               (let ((p-date (alist-get 'date pres)))
+                 (when p-date (push p-date p-parts)))
+               (push (format "%s." (string-join (nreverse p-parts) ", ")) parts))))))
+      ((or 'thesis-doctoral 'thesis-masters)
+       (push (format "[%s]." (if (eq entry-type 'thesis-doctoral)
+                                 "Doctoral dissertation" "Master's thesis")) parts)
+       (when school (push (format "%s;" (merita--escape school)) parts))
+       (when year (push (format "%s." year) parts)))
+      ('grant
+       (let ((role (alist-get 'grant_role entry))
+             (amount (alist-get 'grant_amount entry))
+             (period (alist-get 'grant_period entry))
+             (funding (alist-get 'funding entry))
+             (org (alist-get 'organization entry)))
+         (when role (push (format "Role: %s." role) parts))
+         (when org (push (format "%s." (merita--escape org)) parts))
+         (when funding (push (format "Grant %s." (merita--escape funding)) parts))
+         (when amount (push (format "$%s." (merita--format-currency amount)) parts))
+         (when period (push (format "%s." period) parts))))
+      ('award
+       (let ((body (alist-get 'award_body entry))
+             (org (alist-get 'organization entry)))
+         (when (or body org)
+           (push (format "%s." (merita--escape (or body org))) parts))
+         (when year (push (format "%s." year) parts))))
+      ('software
+       (let ((repo (or (alist-get 'repo_url entry) (alist-get 'url entry)))
+             (lang (alist-get 'repo_language entry))
+             (registry (alist-get 'pkg_registry entry))
+             (pkg-name (alist-get 'pkg_name entry)))
+         (when lang (push (format "[%s]." (merita--escape lang)) parts))
+         (when (and registry pkg-name)
+           (push (format "%s package %s."
+                         (upcase registry) (merita--mono pkg-name))
+                 parts))
+         (when year (push (format "%s." year) parts))
+         (when repo (push (merita--href repo) parts))
+         (let ((xrefs (merita--get-related (alist-get 'id entry) "software-paper")))
+           (when xrefs
+             (dolist (rel xrefs)
+               (push (format "See also: %s%s."
+                             (merita--escape (or (alist-get 'title rel) ""))
+                             (if (alist-get 'year rel)
+                                 (format " (%s)" (alist-get 'year rel)) ""))
+                     parts))))))
+      ('dataset
+       (when publisher (push (format "%s;" (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts))
+       (let ((u (or (alist-get 'url entry) doi)))
+         (when u (push (merita--href u) parts))))
+      (_ (when year (push (format "%s." year) parts))))
+    (let ((awards (alist-get 'awards entry)))
+      (when (and awards (not (string-empty-p awards)))
+        (push (format "%s." (merita--emph (merita--escape awards))) parts)))
+    ;; Status indicator
+    (let ((entry-status (alist-get 'status entry)))
+      (when (and entry-status (not (member entry-status '("published" nil))))
+        (push (format "[%s]" (capitalize (replace-regexp-in-string "-" " " entry-status)))
+              parts)))
+    ;; DOI
+    (when doi (push (merita--fmt-doi doi) parts))
+    (string-join (nreverse parts) " ")))
+
+(defun merita--format-currency (amount)
+  "Format AMOUNT with comma separators."
+  (let* ((str (if (integerp amount) (number-to-string amount) (format "%.0f" amount)))
+         (result "") (len (length str)))
+    (dotimes (i len)
+      (when (and (> i 0) (= (mod (- len i) 3) 0))
+        (setq result (concat result ",")))
+      (setq result (concat result (substring str i (1+ i)))))
+    result))
+
+;;; *** 7.1.3. LaTeX Presentation Formatter
+
+(defun merita--format-presentation-line (entry pres)
+  "Format a presentation line from ENTRY and optional PRES alist.
+Uses unified helpers; works in both LaTeX and plain text contexts."
+  (let* ((authors (alist-get 'authors entry))
+         (title (alist-get 'title entry))
+         (conference (or (alist-get 'conference pres) (alist-get 'conference entry)))
+         (location (or (alist-get 'location pres) (alist-get 'conference_location entry)))
+         (date (or (alist-get 'date pres) (alist-get 'conference_date entry)))
+         (pres-type (or (alist-get 'presentation_type pres)
+                        (pcase (intern (or (alist-get 'type entry) "other"))
+                          ('podium "podium") ('poster "poster")
+                          ('invited-talk "invited") ('keynote "keynote") (_ nil))))
+         (parts '()))
+    (when authors (push (format "%s." (merita--emphasize-name (merita--escape authors))) parts))
+    (when title (push (format "%s." (merita--escape title)) parts))
+    (when pres-type
+      (push (format "%s:" (pcase pres-type
+                            ("podium" "Oral presentation") ("poster" "Poster presented")
+                            ("invited" "Invited lecture") ("keynote" "Keynote address")
+                            (_ "Presented")))
+            parts))
+    (when conference (push (format "%s." (merita--escape conference)) parts))
+    (when location (push (format "%s." (merita--escape location)) parts))
+    (when date (push (format "%s." date) parts))
+    (string-join (nreverse parts) " ")))
+
+;;; *** 7.1.4. LaTeX File Generation
+
+;;;###autoload
+(defun merita-export-latex (&optional filename)
+  "Export publications to a LaTeX file."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "publications.tex")))
+  (merita--ensure-db)
+  (let* ((merita--latex-context t)
+         (filename (or filename (expand-file-name "publications.tex"
+                                                  merita-default-export-directory)))
+         (all-entries (merita--query
+                       "SELECT * FROM data
+                        WHERE status IN ('published','in-press','accepted',
+                                         'revision','review','submitted','preparation')
+                        ORDER BY year DESC, month DESC, title ASC"))
+         (extra-presentations '())
+         (grouped (merita--group-by-type all-entries))
+         (ordered-types (merita--ordered-types grouped)))
+    ;; Pre-scan: abstracts with linked presentations
+    (dolist (entry all-entries)
+      (let* ((entry-type (intern (or (alist-get 'type entry) "other")))
+             (entry-id (alist-get 'id entry))
+             (presentations (when entry-id (merita--get-presentations entry-id))))
+        (when (and (eq entry-type 'abstract) presentations)
+          (dolist (pres presentations)
+            (let* ((ptype (or (alist-get 'presentation_type pres) "podium"))
+                   (virtual-type (pcase ptype
+                                   ("poster" 'poster) ("invited" 'invited-talk)
+                                   ("keynote" 'keynote) (_ 'podium)))
+                   (existing (assq virtual-type extra-presentations)))
+              (if existing
+                  (setcdr existing (append (cdr existing) (list (cons entry pres))))
+                (push (cons virtual-type (list (cons entry pres)))
+                      extra-presentations)))))))
+    (with-temp-file filename
+      (insert (format merita-latex-preamble (format-time-string "%Y-%m-%d %H:%M")))
+      (dolist (type ordered-types)
+        (let* ((entries (alist-get type grouped))
+               (extra (alist-get type extra-presentations))
+               (section-title (or (alist-get type merita-latex-section-titles)
+                                  (symbol-name type)))
+               (total-count (+ (length entries) (length extra))))
+          (when (> total-count 0)
+            (insert (format "\\subsection*{%s (%d)}\n" section-title total-count))
+            (if merita-latex-enumerate-style
+                (if merita-latex-reverse-numbering
+                    (insert (format "\\begin{enumerate}[start=%d,label={\\arabic*.}]\n"
+                                    total-count))
+                  (insert "\\begin{enumerate}\n"))
+              (insert "\\begin{itemize}\n"))
+            (let ((sorted (if merita-latex-reverse-numbering (reverse entries) entries)))
+              (dolist (entry sorted)
+                (insert (format "  \\item %s\n\n"
+                                (if (memq type '(podium poster invited-talk keynote workshop))
+                                    (merita--format-presentation-line entry nil)
+                                  (funcall merita-latex-formatter entry))))))
+            (dolist (pair extra)
+              (insert (format "  \\item %s\n\n"
+                              (merita--format-presentation-line (car pair) (cdr pair)))))
+            (insert (if merita-latex-enumerate-style
+                        "\\end{enumerate}\n\n" "\\end{itemize}\n\n"))))))
+    (message "Exported %d entries to %s" (length all-entries) filename)))
+
+(defun merita--group-by-type (entries)
+  "Group ENTRIES by type.  Returns alist."
+  (let ((groups nil))
+    (dolist (entry entries)
+      (let* ((type (intern (or (alist-get 'type entry) "other")))
+             (existing (assq type groups)))
+        (if existing
+            (setcdr existing (append (cdr existing) (list entry)))
+          (push (cons type (list entry)) groups))))
+    groups))
+
+(defun merita--ordered-types (grouped)
+  "Return entry types from GROUPED in display order."
+  (let ((present-types (mapcar #'car grouped))
+        (result nil))
+    (dolist (type merita-latex-section-order)
+      (when (memq type present-types) (push type result)))
+    (dolist (type present-types)
+      (unless (memq type result) (push type result)))
+    (nreverse result)))
+
+;;; ** 7.2. BibTeX Export
+
+;;;###autoload
+(defun merita-export-bibtex (&optional filename)
+  "Export all entries to a BibTeX file."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "merita.bib")))
+  (let* ((filename (or filename (expand-file-name "merita.bib"
+                                                  merita-default-export-directory)))
+         (entries (merita--query "SELECT * FROM data ORDER BY year DESC, title ASC"))
+         (count 0))
+    (with-temp-file filename
+      (insert (format "%% Generated by Merita — %s\n" (format-time-string "%Y-%m-%d %H:%M")))
+      (insert "%% https://codeberg.org/phmcc/merita\n\n")
+      (dolist (entry entries)
+        (insert (merita--entry-to-bibtex entry))
+        (insert "\n")
+        (cl-incf count)))
+    (message "Exported %d entries to %s" count filename)))
+
+(defun merita--generate-bibtex-key (entry)
+  "Generate a BibTeX key for ENTRY."
+  (or (alist-get 'bibtex_key entry)
+      (let* ((authors (or (alist-get 'authors entry) "Unknown"))
+             (year (or (alist-get 'year entry) "XXXX"))
+             (surname (car (split-string authors "[, ]+" t)))
+             (clean (replace-regexp-in-string "[^a-zA-Z]" "" surname)))
+        (format "%s%s" clean year))))
+
+(defun merita--entry-to-bibtex (entry)
+  "Convert ENTRY alist to a BibTeX string."
+  (let* ((entry-type (intern (or (alist-get 'type entry) "other")))
+         (bibtex-type (or (alist-get entry-type merita-entry-type-bibtex-map) "misc"))
+         (key (merita--generate-bibtex-key entry))
+         (fields '()))
+    (cl-flet ((add-field (bib-name merita-name)
+                (let ((val (alist-get merita-name entry)))
+                  (when (and val (not (equal val "")) (not (eq val 0)))
+                    (push (cons bib-name (if (numberp val) (number-to-string val)
+                                           (format "{%s}" val)))
+                          fields)))))
+      (add-field "author" 'authors) (add-field "title" 'title)
+      (add-field "journal" 'journal) (add-field "year" 'year)
+      (add-field "month" 'month) (add-field "volume" 'volume)
+      (add-field "number" 'issue) (add-field "pages" 'pages)
+      (add-field "doi" 'doi) (add-field "url" 'url)
+      (add-field "publisher" 'publisher) (add-field "edition" 'edition)
+      (add-field "editor" 'editors) (add-field "booktitle" 'book_title)
+      (add-field "isbn" 'isbn) (add-field "series" 'series)
+      (add-field "school" 'school) (add-field "institution" 'organization)
+      (add-field "abstract" 'abstract) (add-field "keywords" 'keywords)
+      (add-field "note" 'notes)
+      (add-field "merita-type" 'type)
+      (add-field "merita-author-position" 'author_position)
+      (add-field "merita-citations" 'citations)
+      (add-field "merita-impact-factor" 'impact_factor)
+      (add-field "merita-repo-url" 'repo_url)
+      (add-field "merita-pkg-registry" 'pkg_registry)
+      (add-field "merita-pkg-name" 'pkg_name)
+      (add-field "merita-language" 'repo_language))
+    (format "@%s{%s,\n%s\n}\n" bibtex-type key
+            (string-join (mapcar (lambda (f) (format "  %s = %s" (car f) (cdr f)))
+                                 (nreverse fields))
+                         ",\n"))))
+
+;;; ** 7.3. TSV Export
+
+;;;###autoload
+(defun merita-export-tsv (&optional filename)
+  "Export all entries to a TSV file."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "merita.tsv")))
+  (let* ((db (merita--ensure-db))
+         (filename (or filename (expand-file-name "merita.tsv"
+                                                  merita-default-export-directory)))
+         (rows (sqlite-select db "SELECT * FROM data ORDER BY id" nil 'full))
+         (columns (car rows))
+         (data (cdr rows)))
+    (with-temp-file filename
+      (insert (string-join columns "\t") "\n")
+      (dolist (row data)
+        (insert (string-join
+                 (mapcar (lambda (val)
+                           (cond ((null val) "")
+                                 ((numberp val) (number-to-string val))
+                                 (t (replace-regexp-in-string
+                                     "[\t\n\r]" " " (format "%s" val)))))
+                         row) "\t") "\n")))
+    (message "Exported %d entries to %s" (length data) filename)))
+
+;;; ** 7.4. Citation Formatters
+;;
+;; All formatters use the unified helpers in section 7.1.2:
+;; `merita--emphasize-name', `merita--escape', `merita--emph',
+;; `merita--mono', `merita--href', `merita--fmt-doi'.
+;; These are context-aware — they produce LaTeX or plain text
+;; depending on `merita--latex-context'.
+
+(defun merita--entry-fields (entry)
+  "Extract common fields from ENTRY as a plist for formatters."
+  (list :authors    (alist-get 'authors entry)
+        :title      (alist-get 'title entry)
+        :journal    (alist-get 'journal entry)
+        :journal-ab (alist-get 'journal_abbrev entry)
+        :year       (alist-get 'year entry)
+        :volume     (alist-get 'volume entry)
+        :issue      (alist-get 'issue entry)
+        :pages      (alist-get 'pages entry)
+        :doi        (alist-get 'doi entry)
+        :book-title (alist-get 'book_title entry)
+        :publisher  (alist-get 'publisher entry)
+        :editors    (alist-get 'editors entry)
+        :school     (alist-get 'school entry)
+        :type       (intern (or (alist-get 'type entry) "other"))
+        :status     (alist-get 'status entry)
+        :url        (alist-get 'url entry)
+        :repo-url   (alist-get 'repo_url entry)
+        :pkg-reg    (alist-get 'pkg_registry entry)
+        :pkg-name   (alist-get 'pkg_name entry)
+        :language   (alist-get 'repo_language entry)))
+
+;;; *** 7.4.1. APA 7th Edition
+
+(defun merita-format-apa (entry)
+  "Format ENTRY in APA 7th edition style."
+  (let* ((f (merita--entry-fields entry))
+         (authors (plist-get f :authors))
+         (title (plist-get f :title))
+         (journal (or (plist-get f :journal) ""))
+         (year (plist-get f :year))
+         (volume (plist-get f :volume))
+         (issue (plist-get f :issue))
+         (pages (plist-get f :pages))
+         (doi (plist-get f :doi))
+         (book-title (plist-get f :book-title))
+         (publisher (plist-get f :publisher))
+         (editors (plist-get f :editors))
+         (school (plist-get f :school))
+         (type (plist-get f :type))
+         (status (plist-get f :status))
+         (parts '()))
+    (when authors
+      (push (merita--emphasize-name (merita--escape authors)) parts))
+    (push (format "(%s)." (or year "n.d.")) parts)
+    (when title (push (format "%s." (merita--escape title)) parts))
+    (pcase type
+      ((or 'journal-article 'review-article 'editorial 'letter
+           'case-report 'abstract)
+       (let ((vol-str (cond
+                       ((and volume issue) (format "%s(%s)" volume issue))
+                       (volume volume)
+                       (t nil))))
+         (when (not (string-empty-p journal))
+           (push (format "%s%s%s."
+                         (merita--emph journal)
+                         (if vol-str (format ", %s" vol-str) "")
+                         (if pages (format ", %s" pages) ""))
+                 parts))))
+      ('book-chapter
+       (when editors (push (format "In %s (Eds.)," (merita--escape editors)) parts))
+       (when book-title (push (merita--emph book-title) parts))
+       (when pages (push (format "(pp. %s)." pages) parts))
+       (when publisher (push (format "%s." (merita--escape publisher)) parts)))
+      ('book
+       (when publisher (push (format "%s." (merita--escape publisher)) parts)))
+      ('conference-paper
+       (when book-title (push (format "In %s." (merita--emph book-title)) parts))
+       (when publisher (push (format "%s." (merita--escape publisher)) parts)))
+      ((or 'thesis-doctoral 'thesis-masters)
+       (push (format "[%s]."
+                      (if (eq type 'thesis-doctoral)
+                          "Doctoral dissertation" "Master's thesis"))
+             parts)
+       (when school (push (format "%s." (merita--escape school)) parts)))
+      ((or 'software 'dataset)
+       (let ((lang (plist-get f :language))
+             (registry (plist-get f :pkg-reg))
+             (pkg (plist-get f :pkg-name))
+             (url (or (plist-get f :repo-url) (plist-get f :url))))
+         (when lang (push (format "[%s]." (merita--escape lang)) parts))
+         (when (and registry pkg)
+           (push (format "%s package %s." (upcase registry) (merita--mono pkg)) parts))
+         (when url (push (merita--href url) parts))))
+      (_ nil))
+    (when (and status (not (member status '("published" nil))))
+      (push (format "[%s]" (capitalize status)) parts))
+    (when doi (push (merita--fmt-doi doi) parts))
+    (string-join (nreverse parts) " ")))
+
+;;; *** 7.4.2. IEEE
+
+(defun merita-format-ieee (entry)
+  "Format ENTRY in IEEE citation style."
+  (let* ((f (merita--entry-fields entry))
+         (authors (plist-get f :authors))
+         (title (plist-get f :title))
+         (journal (or (plist-get f :journal) ""))
+         (year (plist-get f :year))
+         (volume (plist-get f :volume))
+         (issue (plist-get f :issue))
+         (pages (plist-get f :pages))
+         (doi (plist-get f :doi))
+         (book-title (plist-get f :book-title))
+         (publisher (plist-get f :publisher))
+         (school (plist-get f :school))
+         (type (plist-get f :type))
+         (parts '()))
+    (when authors
+      (push (format "%s," (merita--emphasize-name (merita--escape authors))) parts))
+    (when title (push (format "\"%s,\"" (merita--escape title)) parts))
+    (pcase type
+      ((or 'journal-article 'review-article 'editorial 'letter
+           'case-report 'abstract)
+       (when (not (string-empty-p journal))
+         (push (format "%s," (merita--emph journal)) parts))
+       (when volume (push (format "vol. %s," volume) parts))
+       (when issue (push (format "no. %s," issue) parts))
+       (when pages (push (format "pp. %s," pages) parts))
+       (when year (push (format "%s." year) parts)))
+      ('book-chapter
+       (push "in" parts)
+       (when book-title (push (format "%s," (merita--emph book-title)) parts))
+       (when publisher (push (format "%s," (merita--escape publisher)) parts))
+       (when year (push (format "%s," year) parts))
+       (when pages (push (format "pp. %s." pages) parts)))
+      ('book
+       (when publisher (push (format "%s," (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts)))
+      ('conference-paper
+       (push "in" parts)
+       (when book-title (push (format "%s," (merita--emph book-title)) parts))
+       (when year (push (format "%s," year) parts))
+       (when pages (push (format "pp. %s." pages) parts)))
+      ((or 'thesis-doctoral 'thesis-masters)
+       (push (format "\"%s,\"" (if (eq type 'thesis-doctoral)
+                                   "Ph.D. dissertation" "M.S. thesis"))
+             parts)
+       (when school (push (format "%s," (merita--escape school)) parts))
+       (when year (push (format "%s." year) parts)))
+      ((or 'software 'dataset)
+       (let ((lang (plist-get f :language))
+             (registry (plist-get f :pkg-reg))
+             (pkg (plist-get f :pkg-name))
+             (url (or (plist-get f :repo-url) (plist-get f :url))))
+         (when lang (push (format "[%s]," (merita--escape lang)) parts))
+         (when (and registry pkg)
+           (push (format "%s package %s," (upcase registry) (merita--mono pkg)) parts))
+         (when year (push (format "%s." year) parts))
+         (when url (push (format "[Online]. Available: %s" (merita--href url)) parts))))
+      (_ (when year (push (format "%s." year) parts))))
+    (when doi (push (format "%s." (merita--fmt-doi doi)) parts))
+    (string-join (nreverse parts) " ")))
+
+;;; *** 7.4.3. Chicago (Author-Date, 17th Edition)
+
+(defun merita-format-chicago (entry)
+  "Format ENTRY in Chicago author-date style (17th edition)."
+  (let* ((f (merita--entry-fields entry))
+         (authors (plist-get f :authors))
+         (title (plist-get f :title))
+         (journal (or (plist-get f :journal) ""))
+         (year (plist-get f :year))
+         (volume (plist-get f :volume))
+         (issue (plist-get f :issue))
+         (pages (plist-get f :pages))
+         (book-title (plist-get f :book-title))
+         (publisher (plist-get f :publisher))
+         (editors (plist-get f :editors))
+         (school (plist-get f :school))
+         (type (plist-get f :type))
+         (parts '()))
+    (when authors
+      (push (format "%s." (merita--emphasize-name (merita--escape authors))) parts))
+    (push (format "%s." (or year "n.d.")) parts)
+    (when title (push (format "\"%s.\"" (merita--escape title)) parts))
+    (pcase type
+      ((or 'journal-article 'review-article 'editorial 'letter
+           'case-report 'abstract)
+       (when (not (string-empty-p journal))
+         (let ((vol-str (cond
+                         ((and volume issue) (format "%s (%s)" volume issue))
+                         (volume (format "%s" volume))
+                         (t nil))))
+           (push (format "%s%s%s."
+                         (merita--emph journal)
+                         (if vol-str (format " %s" vol-str) "")
+                         (if pages (format ": %s" pages) ""))
+                 parts))))
+      ('book-chapter
+       (push "In" parts)
+       (when book-title (push (format "%s," (merita--emph book-title)) parts))
+       (when editors (push (format "edited by %s," (merita--escape editors)) parts))
+       (when pages (push (format "%s." pages) parts))
+       (when publisher (push (format "%s." (merita--escape publisher)) parts)))
+      ('book
+       (when publisher (push (format "%s." (merita--escape publisher)) parts)))
+      ((or 'thesis-doctoral 'thesis-masters)
+       (push (format "%s thesis,"
+                      (if (eq type 'thesis-doctoral) "PhD" "Master's"))
+             parts)
+       (when school (push (format "%s." (merita--escape school)) parts)))
+      ((or 'software 'dataset)
+       (let ((lang (plist-get f :language))
+             (registry (plist-get f :pkg-reg))
+             (pkg (plist-get f :pkg-name))
+             (url (or (plist-get f :repo-url) (plist-get f :url))))
+         (when lang (push (format "[%s]." (merita--escape lang)) parts))
+         (when (and registry pkg)
+           (push (format "%s package %s." (upcase registry) (merita--mono pkg)) parts))
+         (when url (push (format "%s." (merita--href url)) parts))))
+      (_ nil))
+    (string-join (nreverse parts) " ")))
+
+;;; *** 7.4.4. NLM (National Library of Medicine)
+
+(defun merita-format-nlm (entry)
+  "Format ENTRY in NLM citation style."
+  (let* ((f (merita--entry-fields entry))
+         (authors (plist-get f :authors))
+         (title (plist-get f :title))
+         (journal (plist-get f :journal))
+         (journal-ab (plist-get f :journal-ab))
+         (year (plist-get f :year))
+         (volume (plist-get f :volume))
+         (issue (plist-get f :issue))
+         (pages (plist-get f :pages))
+         (doi (plist-get f :doi))
+         (book-title (plist-get f :book-title))
+         (publisher (plist-get f :publisher))
+         (editors (plist-get f :editors))
+         (school (plist-get f :school))
+         (type (plist-get f :type))
+         (parts '()))
+    (when authors
+      (push (format "%s." (merita--emphasize-name (merita--escape authors))) parts))
+    (when title (push (format "%s." (merita--escape title)) parts))
+    (pcase type
+      ((or 'journal-article 'review-article 'editorial 'letter
+           'case-report 'abstract)
+       (when (or journal-ab journal)
+         (push (format "%s." (merita--emph (or journal-ab journal))) parts))
+       (when year
+         (let ((vol-str (cond
+                         ((and volume issue) (format "%s;%s(%s)" year volume issue))
+                         (volume (format "%s;%s" year volume))
+                         (t (format "%s" year)))))
+           (push (if pages (format "%s:%s." vol-str pages)
+                   (format "%s." vol-str))
+                 parts))))
+      ('book-chapter
+       (push "In:" parts)
+       (when editors (push (format "%s, editors." (merita--escape editors)) parts))
+       (when book-title (push (format "%s." (merita--emph book-title)) parts))
+       (when publisher (push (format "%s;" (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts))
+       (when pages (push (format "p. %s." pages) parts)))
+      ('book
+       (when publisher (push (format "%s;" (merita--escape publisher)) parts))
+       (when year (push (format "%s." year) parts)))
+      ((or 'thesis-doctoral 'thesis-masters)
+       (push (format "[%s]."
+                      (if (eq type 'thesis-doctoral)
+                          "dissertation" "master's thesis"))
+             parts)
+       (when school (push (format "%s;" (merita--escape school)) parts))
+       (when year (push (format "%s." year) parts)))
+      ((or 'software 'dataset)
+       (let ((lang (plist-get f :language))
+             (registry (plist-get f :pkg-reg))
+             (pkg (plist-get f :pkg-name))
+             (url (or (plist-get f :repo-url) (plist-get f :url))))
+         (when lang (push (format "[%s]." (merita--escape lang)) parts))
+         (when (and registry pkg)
+           (push (format "%s package %s." (upcase registry) (merita--mono pkg)) parts))
+         (when year (push (format "%s." year) parts))
+         (when url (push (format "Available from: %s" (merita--href url)) parts))))
+      (_ (when year (push (format "%s." year) parts))))
+    (when doi (push (merita--fmt-doi doi) parts))
+    (string-join (nreverse parts) " ")))
+
+;;; *** 7.4.5. Plain Text (minimal)
+
+(defun merita-format-plain (entry)
+  "Format ENTRY as a minimal plain text citation."
+  (let* ((f (merita--entry-fields entry))
+         (authors (or (plist-get f :authors) ""))
+         (title (or (plist-get f :title) ""))
+         (journal (or (plist-get f :journal-ab)
+                      (plist-get f :journal) ""))
+         (year (plist-get f :year))
+         (volume (plist-get f :volume))
+         (issue (plist-get f :issue))
+         (pages (plist-get f :pages))
+         (doi (plist-get f :doi))
+         (type (plist-get f :type))
+         (parts '()))
+    (when (not (string-empty-p authors))
+      (push (format "%s." (merita--emphasize-name (merita--escape authors))) parts))
+    (when (not (string-empty-p title))
+      (push (format "%s." (merita--escape title)) parts))
+    (if (memq type '(software dataset))
+        ;; Software/dataset: language, registry, URL
+        (let ((lang (plist-get f :language))
+              (registry (plist-get f :pkg-reg))
+              (pkg (plist-get f :pkg-name))
+              (url (or (plist-get f :repo-url) (plist-get f :url))))
+          (when lang (push (format "[%s]." (merita--escape lang)) parts))
+          (when (and registry pkg)
+            (push (format "%s: %s." (upcase registry) (merita--mono pkg)) parts))
+          (when year (push (format "%s." year) parts))
+          (when url (push (merita--href url) parts)))
+      ;; Publications: journal, volume, pages
+      (when (not (string-empty-p journal))
+        (push (format "%s." (merita--emph journal)) parts))
+      (when year
+        (let ((vol-str (cond
+                        ((and volume issue) (format "%s;%s(%s)" year volume issue))
+                        (volume (format "%s;%s" year volume))
+                        (t (format "%s" year)))))
+          (push (if pages (format "%s:%s." vol-str pages)
+                  (format "%s." vol-str))
+                parts))))
+    (when doi (push (merita--fmt-doi doi) parts))
+    (string-join (nreverse parts) " ")))
+
+;;; ** 7.5. Plain Text Export
+
+(defcustom merita-text-formatter #'merita-format-apa
+  "Citation formatter for plain text export."
+  :type 'function
+  :group 'merita)
+
+(defcustom merita-text-numbered t
+  "If non-nil, number entries in plain text export."
+  :type 'boolean
+  :group 'merita)
+
+;;;###autoload
+(defun merita-export-text (&optional filename formatter)
+  "Export publications to a plain text file.
+FORMATTER defaults to `merita-text-formatter'."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "publications.txt")))
+  (merita--ensure-db)
+  (let* ((fmt (or formatter merita-text-formatter))
+         (filename (or filename (expand-file-name "publications.txt"
+                                                  merita-default-export-directory)))
+         (all-entries (merita--query
+                       "SELECT * FROM data
+                        WHERE status IN ('published','in-press','accepted',
+                                         'revision','review','submitted','preparation')
+                        ORDER BY year DESC, month DESC, title ASC"))
+         (grouped (merita--group-by-type all-entries))
+         (ordered-types (merita--ordered-types grouped))
+         (global-num 0))
+    (with-temp-file filename
+      (insert (format "Publications — generated %s\n"
+                      (format-time-string "%Y-%m-%d")))
+      (insert (make-string 60 ?=) "\n\n")
+      (dolist (type ordered-types)
+        (let* ((entries (alist-get type grouped))
+               (section-title (or (alist-get type merita-latex-section-titles)
+                                  (symbol-name type))))
+          (when entries
+            (insert (format "%s (%d)\n" section-title (length entries)))
+            (insert (make-string (+ (length section-title) 5) ?─) "\n")
+            (let ((sorted (if merita-latex-reverse-numbering
+                              (reverse entries) entries)))
+              (dolist (entry sorted)
+                (cl-incf global-num)
+                (if merita-text-numbered
+                    (insert (format "%3d. %s\n\n" global-num (funcall fmt entry)))
+                  (insert (format "  %s\n\n" (funcall fmt entry))))))
+            (insert "\n")))))
+    (message "Exported %d entries to %s" global-num filename)))
+
+;;;###autoload
+(defun merita-export-text-apa (&optional filename)
+  "Export publications formatted in APA 7th edition."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "publications-apa.txt")))
+  (merita-export-text filename #'merita-format-apa))
+
+;;;###autoload
+(defun merita-export-text-vancouver (&optional filename)
+  "Export publications formatted in Vancouver/NLM style."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "publications-vancouver.txt")))
+  (merita-export-text filename #'merita-format-nlm))
+
+;;;###autoload
+(defun merita-export-text-ieee (&optional filename)
+  "Export publications formatted in IEEE style."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "publications-ieee.txt")))
+  (merita-export-text filename #'merita-format-ieee))
+
+;;;###autoload
+(defun merita-export-text-chicago (&optional filename)
+  "Export publications formatted in Chicago author-date style."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "publications-chicago.txt")))
+  (merita-export-text filename #'merita-format-chicago))
+
+;;; ** 7.6. RIS Export
+
+(defconst merita--ris-type-map
+  '((journal-article  . "JOUR")
+    (review-article   . "JOUR")
+    (editorial        . "JOUR")
+    (letter           . "JOUR")
+    (case-report      . "JOUR")
+    (book             . "BOOK")
+    (book-chapter     . "CHAP")
+    (conference-paper . "CPAPER")
+    (preprint         . "UNPB")
+    (technical-report . "RPRT")
+    (thesis-doctoral  . "THES")
+    (thesis-masters   . "THES")
+    (abstract         . "ABST")
+    (patent           . "PAT")
+    (grant            . "GRANT")
+    (software         . "COMP")
+    (dataset          . "DATA")
+    (other            . "GEN"))
+  "Mapping from Merita entry types to RIS type tags.")
+
+(defun merita--entry-to-ris (entry)
+  "Convert ENTRY alist to an RIS record string."
+  (let* ((type (intern (or (alist-get 'type entry) "other")))
+         (ris-type (or (alist-get type merita--ris-type-map) "GEN"))
+         (lines '()))
+    (push (format "TY  - %s" ris-type) lines)
+    (let ((authors (alist-get 'authors entry)))
+      (when authors
+        (dolist (author (split-string authors "," t "\\s-*"))
+          (push (format "AU  - %s" (string-trim author)) lines))))
+    (let ((title (alist-get 'title entry)))
+      (when title (push (format "TI  - %s" title) lines)))
+    (let ((journal (alist-get 'journal entry)))
+      (when journal (push (format "JO  - %s" journal) lines)))
+    (let ((journal-ab (alist-get 'journal_abbrev entry)))
+      (when journal-ab (push (format "JA  - %s" journal-ab) lines)))
+    (let ((year (alist-get 'year entry)))
+      (when year (push (format "PY  - %d" year) lines)))
+    (let ((year (alist-get 'year entry))
+          (month (alist-get 'month entry))
+          (day (alist-get 'day entry)))
+      (when (and year month)
+        (push (format "DA  - %d/%02d/%s" year month
+                      (if day (format "%02d" day) ""))
+              lines)))
+    (let ((volume (alist-get 'volume entry)))
+      (when volume (push (format "VL  - %s" volume) lines)))
+    (let ((issue (alist-get 'issue entry)))
+      (when issue (push (format "IS  - %s" issue) lines)))
+    (let ((pages (alist-get 'pages entry)))
+      (when pages
+        (let ((parts (split-string pages "[-–]")))
+          (push (format "SP  - %s" (string-trim (car parts))) lines)
+          (when (cadr parts)
+            (push (format "EP  - %s" (string-trim (cadr parts))) lines)))))
+    (let ((doi (alist-get 'doi entry)))
+      (when doi (push (format "DO  - %s" doi) lines)))
+    (let ((url (alist-get 'url entry)))
+      (when url (push (format "UR  - %s" url) lines)))
+    (let ((pmid (alist-get 'pmid entry)))
+      (when pmid (push (format "AN  - %s" pmid) lines)))
+    (let ((abstract (alist-get 'abstract entry)))
+      (when (and abstract (not (string-empty-p abstract)))
+        (push (format "AB  - %s" abstract) lines)))
+    (let ((keywords (alist-get 'keywords entry)))
+      (when keywords
+        (dolist (kw (split-string keywords ";" t "\\s-*"))
+          (push (format "KW  - %s" (string-trim kw)) lines))))
+    (let ((publisher (alist-get 'publisher entry)))
+      (when publisher (push (format "PB  - %s" publisher) lines)))
+    (let ((isbn (alist-get 'isbn entry)))
+      (when isbn (push (format "SN  - %s" isbn) lines)))
+    (let ((book-title (alist-get 'book_title entry)))
+      (when book-title
+        (when (memq type '(book-chapter conference-paper))
+          (push (format "T2  - %s" book-title) lines))))
+    ;; Software-specific fields
+    (let ((repo-url (alist-get 'repo_url entry)))
+      (when repo-url (push (format "UR  - %s" repo-url) lines)))
+    (let ((registry (alist-get 'pkg_registry entry))
+          (pkg-name (alist-get 'pkg_name entry)))
+      (when (and registry pkg-name)
+        (push (format "N1  - %s package: %s" (upcase registry) pkg-name) lines)))
+    (let ((lang (alist-get 'repo_language entry)))
+      (when lang (push (format "M1  - %s" lang) lines)))
+    (push "ER  - " lines)
+    (concat (string-join (nreverse lines) "\n") "\n")))
+
+;;;###autoload
+(defun merita-export-ris (&optional filename)
+  "Export all entries to an RIS file."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "merita.ris")))
+  (merita--ensure-db)
+  (let* ((filename (or filename (expand-file-name "merita.ris"
+                                                  merita-default-export-directory)))
+         (entries (merita--query "SELECT * FROM data ORDER BY year DESC, title ASC"))
+         (count 0))
+    (with-temp-file filename
+      (dolist (entry entries)
+        (insert (merita--entry-to-ris entry))
+        (insert "\n")
+        (cl-incf count)))
+    (message "Exported %d entries to %s" count filename)))
+
+;;; ** 7.7. CSV Export
+
+(defun merita--csv-row (fields)
+  "Format FIELDS as a CSV row with proper quoting (RFC 4180)."
+  (mapconcat
+   (lambda (field)
+     (let ((s (if (stringp field) field (format "%s" field))))
+       (if (string-match-p "[,\"\n\r]" s)
+           (format "\"%s\"" (replace-regexp-in-string "\"" "\"\"" s))
+         s)))
+   fields ","))
+
+;;;###autoload
+(defun merita-export-csv (&optional filename)
+  "Export all entries to a CSV file (RFC 4180)."
+  (interactive
+   (list (read-file-name "Export to: " merita-default-export-directory
+                         nil nil "merita.csv")))
+  (let* ((db (merita--ensure-db))
+         (filename (or filename (expand-file-name "merita.csv"
+                                                  merita-default-export-directory)))
+         (rows (sqlite-select db "SELECT * FROM data ORDER BY id" nil 'full))
+         (columns (car rows))
+         (data (cdr rows)))
+    (with-temp-file filename
+      (insert (merita--csv-row columns) "\n")
+      (dolist (row data)
+        (insert (merita--csv-row
+                 (mapcar (lambda (val)
+                           (cond ((null val) "")
+                                 ((numberp val) (number-to-string val))
+                                 (t (format "%s" val))))
+                         row))
+                "\n")))
+    (message "Exported %d entries to %s" (length data) filename)))
+
+;;; * 8. Utility
+
+;;; ** 8.1. Counting Functions
+
+(defun merita-count (&optional type)
+  "Count entries, optionally filtered by TYPE."
+  (if type
+      (merita--count "type = ?" (list (symbol-name type)))
+    (merita--count)))
+
+(defun merita--pr-where ()
+  "Return a SQL WHERE fragment for peer-reviewed entry types."
+  (format "type IN (%s)"
+          (mapconcat (lambda (typ) (format "'%s'" (symbol-name typ)))
+                     merita-peer-reviewed-types ", ")))
+
+(defun merita-count-peer-reviewed-pubs ()
+  "Count entries whose type is in `merita-peer-reviewed-types'."
+  (merita--count (merita--pr-where)))
+
+(defun merita-count-first-author ()
+  "Count first-author and co-first-author entries."
+  (merita--count "author_position IN ('first', 'co-first')"))
+
+(defun merita-count-first-author-pr ()
+  "Count first/co-first-author peer-reviewed entries."
+  (merita--count (format "%s AND author_position IN ('first', 'co-first')"
+                         (merita--pr-where))))
+
+(defun merita-count-second-author ()
+  "Count second-author entries."
+  (merita--count "author_position = 'second'"))
+
+(defun merita-count-third-author ()
+  "Count third-author entries."
+  (merita--count "author_position = 'third'"))
+
+(defun merita-count-senior-author ()
+  "Count senior-author and co-senior-author entries."
+  (merita--count "author_position IN ('senior', 'co-senior')"))
+
+(defun merita-count-significant-author ()
+  "Count entries with first, second, third, senior, or sole authorship."
+  (merita--count
+   "author_position IN ('first','co-first','second','third','senior',
+                         'co-senior','corresponding','sole')"))
+
+(defun merita-count-peer-reviewed ()
+  "Count peer-reviewed entries."
+  (merita--count "peer_reviewed = 1"))
+
+;;; * 9. Org-Mode Integration
+
+;;; ** 9.1. Dynamic Blocks
+
+(defconst merita-org-type-aliases
+  '(("journal-articles"   . (journal-article review-article))
+    ("book-chapters"      . (book-chapter))
+    ("books"              . (book))
+    ("other-publications" . (editorial letter case-report other media))
+    ("software"           . (software dataset))
+    ("presentations"      . (podium poster invited-talk keynote
+                             workshop abstract conference-paper))
+    ("grants"             . (grant))
+    ("awards"             . (award))
+    ("patents"            . (patent)))
+  "Named aliases for groups of entry types.
+Used in org dynamic blocks, e.g.:
+  #+BEGIN: merita :section journal-articles")
+
+(defun merita--resolve-types (params)
+  "Resolve entry types from PARAMS.
+Accepts either :section (alias from `merita-org-type-aliases')
+or :types (comma-separated entry type names).  Returns a list of
+symbols.  If neither is given, returns nil (meaning all types)."
+  (let ((section (plist-get params :section))
+        (types (plist-get params :types)))
+    (cond
+     (section
+      ;; Org passes :section value as a symbol; coerce to string for lookup
+      (let* ((key (if (symbolp section) (symbol-name section)
+                    (format "%s" section)))
+             (alias (assoc key merita-org-type-aliases)))
+        (if alias (cdr alias)
+          (user-error "Unknown section alias: %s" key))))
+     (types
+      (let ((tstr (if (symbolp types) (symbol-name types)
+                    (format "%s" types))))
+        (mapcar #'intern (split-string tstr ","))))
+     (t nil))))
+
+(defun merita--org-dblock-entries (types)
+  "Query entries matching TYPES (list of symbols), or all if nil.
+Returns entries in chronological order."
+  (let* ((all (merita--query
+               "SELECT * FROM data
+                WHERE status IN ('published','in-press','accepted',
+                                 'revision','review','submitted','preparation')
+                ORDER BY year ASC, month ASC, title ASC")))
+    (if types
+        (cl-remove-if-not
+         (lambda (e)
+           (memq (intern (or (alist-get 'type e) "other")) types))
+         all)
+      all)))
+
+(defun merita--org-format-entries-latex (entries &optional formatter)
+  "Format ENTRIES as a LaTeX enumerate block for org export.
+Wraps output in #+begin_export latex / #+end_export.
+Always numbers from 1 in chronological order.
+FORMATTER overrides `merita-latex-formatter' if given."
+  (let ((presentation-types '(podium poster invited-talk keynote workshop))
+        (fmt (or formatter merita-latex-formatter))
+        (merita--latex-context t))
+    (concat
+     "#+begin_export latex\n"
+     "\\begin{enumerate}\n"
+     (mapconcat
+      (lambda (entry)
+        (let ((etype (intern (or (alist-get 'type entry) "other"))))
+          (format "  \\item %s\n"
+                  (if (memq etype presentation-types)
+                      (merita--format-presentation-line entry nil)
+                    (funcall fmt entry)))))
+      entries
+      "\n")
+     "\\end{enumerate}\n"
+     "#+end_export")))
+
+(defun merita--org-format-entries-plain (entries &optional formatter)
+  "Format ENTRIES as plain text for org.
+FORMATTER is a citation formatter function (default: AMA)."
+  (let ((fmt (or formatter merita-latex-formatter))
+        (i 0))
+    (mapconcat
+     (lambda (entry)
+       (setq i (1+ i))
+       (format "%d. %s" i (funcall fmt entry)))
+     entries
+     "\n\n")))
+
+(defconst merita--style-formatter-map
+  '(("vancouver" . merita-format-vancouver)
+    ("apa"       . merita-format-apa)
+    ("ieee"      . merita-format-ieee)
+    ("chicago"   . merita-format-chicago)
+    ("nlm"       . merita-format-nlm)
+    ("plain"     . merita-format-plain))
+  "Mapping from style names to formatter functions.")
+
+;;;###autoload
+(defun org-dblock-write:merita (params)
+  "Write a Merita dynamic block.
+PARAMS are read from the #+BEGIN: line.  Supported parameters:
+
+  :section ALIAS   — section alias from `merita-org-type-aliases'
+                     e.g., \"journal-articles\", \"presentations\"
+  :types TYPES     — comma-separated entry type names
+                     e.g., \"journal-article,review-article\"
+  :format FORMAT   — \"latex\" (default) or \"plain\"
+  :style STYLE     — citation style override for this block:
+                     vancouver (default), apa, ieee, chicago, nlm, plain
+                     If omitted, uses `merita-latex-formatter'.
+
+If neither :section nor :types is given, all entries are included.
+
+Usage in an org file:
+
+  ** Journal Articles
+  #+BEGIN: merita :section journal-articles
+  #+END:
+
+  ** Journal Articles (APA style)
+  #+BEGIN: merita :section journal-articles :style apa
+  #+END:
+
+Update a block:  \\[org-dblock-update]
+Update all blocks in file:  \\[org-update-all-dblocks]"
+  (merita--ensure-db)
+  (let* ((types (merita--resolve-types params))
+         (fmt-raw (or (plist-get params :format) "latex"))
+         (fmt (if (symbolp fmt-raw) (symbol-name fmt-raw)
+                (format "%s" fmt-raw)))
+         ;; Resolve :style to a formatter function
+         (style-raw (plist-get params :style))
+         (style-str (when style-raw
+                      (if (symbolp style-raw) (symbol-name style-raw)
+                        (format "%s" style-raw))))
+         (formatter (if style-str
+                        (or (cdr (assoc style-str merita--style-formatter-map))
+                            (user-error "Unknown style: %s (available: %s)"
+                                        style-str
+                                        (mapconcat #'car merita--style-formatter-map ", ")))
+                      merita-latex-formatter))
+         (entries (merita--org-dblock-entries types)))
+    (if (null entries)
+        (insert "%% (no entries)\n")
+      (insert
+       (pcase fmt
+         ("plain" (merita--org-format-entries-plain entries formatter))
+         (_ (merita--org-format-entries-latex entries formatter)))
+       "\n"))))
+
+;;; * 10. Provide
+
+(require 'merita-metrics nil t)
+
+(provide 'merita)
+;;; merita.el ends here
