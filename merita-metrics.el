@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Copyright (C) 2026 Paul H. McClelland
 
-;; Version: 0.4.0
+;; Version: 0.4.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: bib, data
 ;; URL: https://codeberg.org/phmcc/merita
@@ -13,8 +13,7 @@
 
 ;; This module fetches citation metrics from OpenAlex and Semantic
 ;; Scholar, storing them in the Merita SQLite database alongside
-;; existing publication records.  Everything is pure Elisp — no Python, no curl, no
-;; external dependencies beyond Emacs 29.1.
+;; existing publication records.
 ;;
 ;; Data sources:
 ;;   - OpenAlex (primary): citation counts, FWCI, OA status,
@@ -30,30 +29,25 @@
 ;; Usage:
 ;;   M-x merita-metrics-update       — fetch metrics (skips recent)
 ;;   M-x merita-metrics-update-force — force refresh all
-;;   M-x merita-metrics-stats        — researcher dashboard
-;;   M-x merita-metrics-top-cited    — most-cited publications
-;;
-;; Suggested keybindings (added automatically to merita-command-map):
-;;   C-c v M  — update metrics
-;;   C-c v S  — stats dashboard
-;;   C-c v T  — top cited
 
 ;;; Code:
+
+;;; * 0. Prerequisites
 
 (require 'url)
 (require 'json)
 (require 'cl-lib)
 
 ;; Merita core is a soft dependency — this module can be byte-compiled
-;; independently, but requires merita at runtime.
+;; independently, but requires `merita' at runtime.
 (declare-function merita--ensure-db "merita")
 (declare-function merita--db-file "merita")
 (declare-function merita-close "merita")
 (declare-function merita-init "merita")
 
-;;;; ===================================================================
-;;;; 1. Customization
-;;;; ===================================================================
+;;; * 1. Foundation
+
+;;; ** 1.1. Customization
 
 (defgroup merita-metrics nil
   "Citation metrics integration for Merita."
@@ -95,9 +89,7 @@ Entries updated more recently than this are skipped unless
                  (const :tag "Semantic Scholar only" semanticscholar))
   :group 'merita-metrics)
 
-;;;; ===================================================================
-;;;; 2. Schema migration
-;;;; ===================================================================
+;;; ** 1.2. Schema Migration
 
 (defconst merita-metrics--columns
   '(;; Citation metrics (publications)
@@ -141,9 +133,7 @@ pkg_registry, pkg_name, pkg_version) are in the base schema.")
             (sqlite-execute db sql)
             (message "merita-metrics: added column %s" name)))))))
 
-;;;; ===================================================================
-;;;; 3. Database queries
-;;;; ===================================================================
+;;; * 2. Database Queries
 
 (defun merita-metrics--dois-to-update (force)
   "Return list of (ID . DOI) pairs needing a metrics update.
@@ -151,16 +141,16 @@ If FORCE is non-nil, return all entries with DOIs."
   (let ((db (merita--ensure-db)))
     (if force
         (sqlite-select db
-          "SELECT id, lower(trim(doi)) FROM data
+                       "SELECT id, lower(trim(doi)) FROM data
            WHERE doi IS NOT NULL AND doi != ''")
       (let ((cutoff (format-time-string
                      "%Y-%m-%dT%H:%M:%S"
                      (time-subtract nil (* merita-metrics-stale-days 86400)))))
         (sqlite-select db
-          "SELECT id, lower(trim(doi)) FROM data
+                       "SELECT id, lower(trim(doi)) FROM data
            WHERE doi IS NOT NULL AND doi != ''
              AND (metrics_updated IS NULL OR metrics_updated < ?)"
-          (list cutoff))))))
+                       (list cutoff))))))
 
 (defun merita-metrics--write-results (doi-ids openalex-data s2-data)
   "Write fetched metrics to the database.
@@ -223,22 +213,22 @@ Each row is (ID URL REPO_URL PKG_REGISTRY PKG_NAME)."
   (let ((db (merita--ensure-db)))
     (if force
         (sqlite-select db
-          "SELECT id, url, repo_url, pkg_registry, pkg_name FROM data
+                       "SELECT id, url, repo_url, pkg_registry, pkg_name FROM data
            WHERE type IN ('software', 'dataset')
              AND (url IS NOT NULL OR repo_url IS NOT NULL)")
       (let ((cutoff (format-time-string
                      "%Y-%m-%dT%H:%M:%S"
                      (time-subtract nil (* merita-metrics-stale-days 86400)))))
         (sqlite-select db
-          "SELECT id, url, repo_url, pkg_registry, pkg_name FROM data
+                       "SELECT id, url, repo_url, pkg_registry, pkg_name FROM data
            WHERE type IN ('software', 'dataset')
              AND (url IS NOT NULL OR repo_url IS NOT NULL)
              AND (metrics_updated IS NULL OR metrics_updated < ?)"
-          (list cutoff))))))
+                       (list cutoff))))))
 
-;;;; ===================================================================
-;;;; 4. HTTP helpers
-;;;; ===================================================================
+;;; * 3. API
+
+;;; ** 3.1. HTTP Helpers
 
 (defun merita-metrics--url-user-agent ()
   "Return a User-Agent string for API requests."
@@ -291,9 +281,7 @@ EXTRA-HEADERS is an alist of additional HTTP headers."
        (message "merita-metrics: POST failed for %s: %s" url err)
        nil))))
 
-;;;; ===================================================================
-;;;; 5. OpenAlex API
-;;;; ===================================================================
+;;; ** 3.2. OpenAlex
 
 (defconst merita-metrics--openalex-batch-size 50
   "Maximum DOIs per OpenAlex filter query.")
@@ -373,9 +361,7 @@ Returns a hash table mapping lowercase DOI -> metrics alist."
         (when (< i total) (sleep-for 0.2))))
     results))
 
-;;;; ===================================================================
-;;;; 6. Semantic Scholar API
-;;;; ===================================================================
+;;; ** 3.3. Semantic Scholar
 
 (defconst merita-metrics--s2-batch-size 500
   "Maximum paper IDs per Semantic Scholar batch request.")
@@ -428,9 +414,7 @@ Returns a hash table mapping lowercase DOI -> metrics alist."
         (when (< i total) (sleep-for 0.5))))
     results))
 
-;;;; ===================================================================
-;;;; 7. GitHub API
-;;;; ===================================================================
+;;; ** 3.4. GitHub
 
 (defun merita-metrics--parse-github-url (url)
   "Extract (OWNER . REPO) from a GitHub URL, or nil."
@@ -454,9 +438,7 @@ Returns an alist of metrics, or nil."
                     (when lic (cdr (assq 'spdx_id lic)))))
             (cons 'repo_created (cdr (assq 'created_at data)))))))
 
-;;;; ===================================================================
-;;;; 8. Package Registry APIs
-;;;; ===================================================================
+;;; ** 3.5. Package Registries
 
 (defun merita-metrics--cran-downloads (package)
   "Fetch last-month download count for CRAN PACKAGE."
@@ -492,8 +474,8 @@ Returns the number of fields updated."
           (when data
             (push "repo_host = ?" sets) (push "github" params)
             (dolist (field '(repo_stars repo_forks repo_watchers
-                             repo_open_issues repo_language repo_license
-                             repo_created))
+                                        repo_open_issues repo_language repo_license
+                                        repo_created))
               (let ((val (cdr (assq field data))))
                 (when val
                   (push (format "%s = ?" field) sets)
@@ -520,90 +502,10 @@ Returns the number of fields updated."
         (sqlite-execute db sql (nreverse params)))
       (length sets))))
 
-;;;; ===================================================================
-;;;; 9. Researcher statistics
-;;;; ===================================================================
 
-(defun merita-metrics--compute-stats ()
-  "Compute aggregate researcher metrics and store in meta table.
-Returns an alist of statistics."
-  (let* ((db (merita--ensure-db))
-         (rows (sqlite-select db
-                 "SELECT citations, cited_by_count_openalex,
-                         cited_by_count_s2, influential_citation_count,
-                         type, author_position, year, fwci
-                  FROM data
-                  WHERE type IN (
-                      'journal-article', 'review-article', 'editorial',
-                      'letter', 'case-report', 'book', 'book-chapter',
-                      'conference-paper', 'preprint'
-                  )
-                  ORDER BY citations DESC")))
-    (if (null rows)
-        (list (cons 'h_index 0)
-              (cons 'total_publications 0))
-      (let* ((citations (mapcar (lambda (r) (or (nth 0 r) 0)) rows))
-             ;; h-index
-             (h-index (let ((h 0))
-                        (cl-loop for c in citations
-                                 for i from 1
-                                 while (>= c i)
-                                 do (setq h i))
-                        h))
-             ;; i10-index
-             (i10 (cl-count-if (lambda (c) (>= c 10)) citations))
-             ;; Totals
-             (total-cit (apply #'+ citations))
-             (influential (apply #'+ (mapcar
-                                      (lambda (r) (or (nth 3 r) 0))
-                                      rows)))
-             ;; Author position counts
-             (first-author (cl-count-if
-                            (lambda (r) (equal (nth 5 r) "first"))
-                            rows))
-             (senior-author (cl-count-if
-                             (lambda (r) (member (nth 5 r)
-                                                 '("senior" "last")))
-                             rows))
-             ;; Mean FWCI
-             (fwci-vals (cl-remove-if-not #'identity
-                                          (mapcar (lambda (r) (nth 7 r))
-                                                  rows)))
-             (mean-fwci (when fwci-vals
-                          (/ (apply #'+ fwci-vals)
-                             (float (length fwci-vals)))))
-             ;; By year
-             (year-counts
-              (let ((ht (make-hash-table :test #'equal)))
-                (dolist (r rows)
-                  (let ((yr (nth 6 r)))
-                    (when yr
-                      (puthash yr (1+ (gethash yr ht 0)) ht))))
-                (let (pairs)
-                  (maphash (lambda (k v) (push (cons k v) pairs)) ht)
-                  (sort pairs (lambda (a b) (< (car a) (car b)))))))
-             (stats
-              (list (cons 'h_index h-index)
-                    (cons 'i10_index i10)
-                    (cons 'total_citations total-cit)
-                    (cons 'total_influential_citations influential)
-                    (cons 'total_publications (length rows))
-                    (cons 'first_author_count first-author)
-                    (cons 'senior_author_count senior-author)
-                    (cons 'mean_fwci (when mean-fwci
-                                       (/ (round (* mean-fwci 100)) 100.0)))
-                    (cons 'publications_by_year year-counts)
-                    (cons 'updated (format-time-string
-                                   "%Y-%m-%dT%H:%M:%S%z")))))
-        ;; Persist to meta table
-        (sqlite-execute db
-          "INSERT OR REPLACE INTO meta (key, value) VALUES ('researcher_stats', ?)"
-          (list (json-encode stats)))
-        stats))))
+;;; * 4. Interactive Commands
 
-;;;; ===================================================================
-;;;; 10. Interactive commands
-;;;; ===================================================================
+;;; ** 4.1. Update
 
 ;;;###autoload
 (defun merita-metrics-update (&optional force)
@@ -649,11 +551,11 @@ With prefix argument FORCE, update all entries regardless."
     ;; Summary
     (if (and (= pub-updated 0) (= sw-updated 0) (null dois))
         (message "All entries are up to date.")
-      (let ((stats (merita-metrics--compute-stats)))
+      (let ((h (merita-h-index))
+            (total-cit (or (caar (sqlite-select (merita--ensure-db)
+                                   "SELECT SUM(citations) FROM data")) 0)))
         (message "Updated %d publications, %d software — h-index: %d, total citations: %d"
-                 pub-updated sw-updated
-                 (or (cdr (assq 'h_index stats)) 0)
-                 (or (cdr (assq 'total_citations stats)) 0))))))
+                 pub-updated sw-updated h total-cit)))))
 
 ;;;###autoload
 (defun merita-metrics-update-force ()
@@ -661,86 +563,18 @@ With prefix argument FORCE, update all entries regardless."
   (interactive)
   (merita-metrics-update t))
 
-;;;###autoload
-(defun merita-metrics-stats ()
-  "Display a researcher metrics dashboard."
-  (interactive)
-  (require 'merita)
-  (merita--ensure-db)
-  (merita-metrics--ensure-schema)
-  (let ((stats (merita-metrics--compute-stats)))
-    (merita-metrics--display-stats stats)))
-
-(defun merita-metrics--display-stats (stats)
-  "Display STATS alist in a dedicated buffer."
-  (let ((buf (get-buffer-create "*Merita Metrics*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize "Merita — Researcher Metrics Dashboard\n"
-                            'face '(:height 1.3 :weight bold)))
-        (insert (make-string 50 ?─) "\n\n")
-
-        (let ((h       (cdr (assq 'h_index stats)))
-              (i10     (cdr (assq 'i10_index stats)))
-              (cit     (cdr (assq 'total_citations stats)))
-              (inf     (cdr (assq 'total_influential_citations stats)))
-              (pubs    (cdr (assq 'total_publications stats)))
-              (first   (cdr (assq 'first_author_count stats)))
-              (senior  (cdr (assq 'senior_author_count stats)))
-              (fwci    (cdr (assq 'mean_fwci stats)))
-              (updated (cdr (assq 'updated stats))))
-
-          (insert (propertize "Citation Metrics\n" 'face '(:weight bold)))
-          (insert (format "  h-index:                  %d\n" (or h 0)))
-          (insert (format "  i10-index:                %d\n" (or i10 0)))
-          (insert (format "  Total citations:          %d\n" (or cit 0)))
-          (insert (format "  Influential citations:    %d\n" (or inf 0)))
-          (when fwci
-            (insert (format "  Mean FWCI:                %.2f\n" fwci)))
-          (insert "\n")
-
-          (insert (propertize "Publication Summary\n" 'face '(:weight bold)))
-          (insert (format "  Total publications:       %d\n" (or pubs 0)))
-          (insert (format "  First-author:             %d\n" (or first 0)))
-          (insert (format "  Senior/last-author:       %d\n" (or senior 0)))
-          (insert "\n")
-
-          ;; Publications by year sparkline
-          (let ((by-year (cdr (assq 'publications_by_year stats))))
-            (when by-year
-              (insert (propertize "Publications by Year\n" 'face '(:weight bold)))
-              (dolist (pair by-year)
-                (let ((yr (car pair))
-                      (ct (cdr pair)))
-                  (insert (format "  %4d  %s %d\n"
-                                  yr
-                                  (make-string (min ct 40) ?█)
-                                  ct))))
-              (insert "\n")))
-
-          (when updated
-            (insert (propertize (format "Last computed: %s\n" updated)
-                                'face 'font-lock-comment-face))))
-
-        (goto-char (point-min))
-        (special-mode)))
-    (pop-to-buffer buf)))
-
-;;;; ===================================================================
-;;;; 11. Per-entry metrics
-;;;; ===================================================================
+;;; ** 4.2. Per-Entry Metrics
 
 (defun merita-metrics-for-entry (entry-id)
   "Return an alist of metrics for ENTRY-ID, or nil."
   (let* ((db (merita--ensure-db))
          (row (car (sqlite-select db
-                     "SELECT citations, cited_by_count_openalex,
+                                  "SELECT citations, cited_by_count_openalex,
                              cited_by_count_s2, influential_citation_count,
                              fwci, oa_status, citations_by_year,
                              metrics_updated
                       FROM data WHERE id = ?"
-                     (list entry-id)))))
+                                  (list entry-id)))))
     (when row
       (list (cons 'citations (nth 0 row))
             (cons 'openalex (nth 1 row))
@@ -772,70 +606,13 @@ With prefix argument FORCE, update all entries regardless."
                   (or updated "never")))
       "No metrics data")))
 
-;;;; ===================================================================
-;;;; 12. Top-cited display
-;;;; ===================================================================
-
-;;;###autoload
-(defun merita-metrics-top-cited (&optional n)
-  "Display the top N most-cited publications (default 20)."
-  (interactive "P")
-  (require 'merita)
-  (merita--ensure-db)
-  (let* ((limit (or n 20))
-         (db (merita--ensure-db))
-         (rows (sqlite-select db
-                 (format
-                  "SELECT id, title, year, journal, citations,
-                          influential_citation_count, fwci,
-                          author_position
-                   FROM data
-                   WHERE citations > 0
-                   ORDER BY citations DESC
-                   LIMIT %d" limit))))
-    (if (null rows)
-        (message "No citation data.  Run M-x merita-metrics-update first.")
-      (let ((buf (get-buffer-create "*Merita Top Cited*")))
-        (with-current-buffer buf
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert (propertize (format "Top %d Cited Publications\n" limit)
-                                'face '(:height 1.2 :weight bold)))
-            (insert (make-string 50 ?─) "\n\n")
-            (let ((rank 0))
-              (dolist (row rows)
-                (cl-incf rank)
-                (let ((title (nth 1 row))
-                      (year (nth 2 row))
-                      (journal (nth 3 row))
-                      (cites (or (nth 4 row) 0))
-                      (influential (or (nth 5 row) 0))
-                      (fwci (nth 6 row))
-                      (position (nth 7 row)))
-                  (insert (format "%2d. " rank))
-                  (insert (propertize (or title "Untitled")
-                                      'face '(:weight bold)))
-                  (insert "\n")
-                  (insert (format "    %s (%s) — %s\n"
-                                  (or journal "") (or year "")
-                                  (or position "")))
-                  (insert (format "    Citations: %d  Influential: %d%s\n\n"
-                                  cites influential
-                                  (if fwci (format "  FWCI: %.2f" fwci)
-                                    ""))))))
-            (goto-char (point-min))
-            (special-mode)))
-        (pop-to-buffer buf)))))
-
-;;;; ===================================================================
-;;;; 13. Keybinding integration
-;;;; ===================================================================
+;;; * 5. Keybinding Integration
 
 (with-eval-after-load 'merita
   (when (boundp 'merita-command-map)
-    (define-key merita-command-map (kbd "M") #'merita-metrics-update)
-    (define-key merita-command-map (kbd "S") #'merita-metrics-stats)
-    (define-key merita-command-map (kbd "T") #'merita-metrics-top-cited)))
+    (define-key merita-command-map (kbd "M") #'merita-metrics-update)))
+
+;;; * 6. Provide
 
 (provide 'merita-metrics)
 ;;; merita-metrics.el ends here

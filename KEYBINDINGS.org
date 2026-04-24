@@ -6,95 +6,76 @@ This file documents the keybindings for ~merita~.  The ~merita-command-map~ is n
 
 * Command Map (~merita-command-map~)
 
-The command map provides a single prefix for frequently used ~merita~ commands.  Additional commands (batch import, specific text export styles, ORCID diff, author position annotation) are available via =M-x=.
+The command map provides a single prefix for frequently used commands.  Additional commands (batch import, specific text export styles, ORCID diff, author position annotation) are available via =M-x=.
 
-| Key | Command                 | Description                    |
-|-----+-------------------------+--------------------------------|
-| ~i~ | ~merita-init~           | Initialize database            |
-| ~q~ | ~merita-close~          | Close database connection      |
-| ~a~ | ~merita-add~            | Add entry interactively        |
-| ~d~ | ~merita-add-from-doi~   | Add entry by DOI               |
-| ~f~ | ~merita-find~           | Find entry (completing-read)   |
-| ~s~ | ~merita-search~         | Search title/authors/journal   |
-| ~l~ | ~merita-browse~         | Browse all entries             |
-| ~e~ | ~merita-edit~           | Edit an entry (select fields)  |
-| ~D~ | ~merita-delete~         | Delete an entry                |
-| ~o~ | ~merita-import-orcid~   | Import from ORCID record       |
-| ~x~ | ~merita-export-latex~   | Export to LaTeX                |
-| ~b~ | ~merita-export-bibtex~  | Export to BibTeX               |
-| ~t~ | ~merita-export-tsv~     | Export to TSV                  |
-| ~r~ | ~merita-export-ris~     | Export to RIS                  |
-| ~c~ | ~merita-export-csv~     | Export to CSV                  |
-| ~p~ | ~merita-summary~        | Career summary dashboard       |
-| ~L~ | ~merita-link-entries~   | Link two entries               |
-| ~U~ | ~merita-unlink-entries~ | Unlink two entries             |
-| ~R~ | ~merita-list-related~   | Show linked entries            |
+| Key | Command                  | Description                     |
+|-----+--------------------------+---------------------------------|
+| =i= | ~merita-init~            | Initialize database             |
+| =q= | ~merita-close~           | Close database connection       |
+| =N= | ~merita-new-entry~       | New entry interactively         |
+| =d= | ~merita-add-from-doi~    | Add entry by DOI                |
+| =f= | ~merita-find~            | Find entry (~completing-read~)  |
+| =/= | ~merita-search~          | Search title/authors/journal    |
+| =l= | ~merita-browse~          | Browse all entries              |
+| =e= | ~merita-edit~            | Edit an entry (select fields)   |
+| =D= | ~merita-delete~          | Delete an entry                 |
+| =o= | ~merita-import-orcid~    | Import from ORCID record        |
+| =x= | ~merita-export-latex~    | Export to LaTeX                 |
+| =b= | ~merita-export-bibtex~   | Export to BibTeX                |
+| =t= | ~merita-export-tsv~      | Export to TSV                   |
+| =r= | ~merita-export-ris~      | Export to RIS                   |
+| =c= | ~merita-export-csv~      | Export to CSV                   |
+| =B= | ~merita-bibliography~    | Generate bibliography           |
+| =s= | ~merita-stats~           | Career statistics dashboard     |
+| =L= | ~merita-link-entries~    | Link two entries                |
+| =U= | ~merita-unlink-entries~  | Unlink two entries              |
+| =R= | ~merita-list-related~    | Show linked entries             |
 
-The metrics module adds additional bindings when loaded:
-
-| Key | Command                    | Description                     |
-|-----+----------------------------+---------------------------------|
-| ~M~ | ~merita-metrics-update~    | Fetch citation/software metrics |
-| ~S~ | ~merita-metrics-stats~     | Metrics dashboard               |
-| ~T~ | ~merita-metrics-top-cited~ | Top cited publications          |
+The metrics module adds =M= (~merita-metrics-update~) for fetching citation and software metrics from OpenAlex, Semantic Scholar, and GitHub.
 
 * Browse Mode (~merita-browse-mode~)
 
 Accessible via ~merita-browse~ (command map: =l=).
 
-| Key   | Command                  | Description              |
-|-------+--------------------------+--------------------------|
-| ~RET~ | ~merita-browse-view~     | View entry at point      |
-| ~e~   | ~merita-browse-export~   | Export citation at point |
-| ~E~   | ~merita-browse-edit~     | Edit entry at point      |
-| ~D~   | ~merita-browse-delete~   | Delete entry at point    |
-| ~a~   | ~merita-browse-add~      | Add new entry            |
-| ~d~   | ~merita-browse-add-doi~  | Add entry by DOI         |
-| ~b~   | ~merita-browse-open-url~ | Open DOI/PMID in browser |
-| ~/~   | ~merita-browse-search~   | Search                   |
-| ~m~   | ~merita-browse-metrics~  | Show metrics at point    |
-| ~g~   | ~merita-browse-refresh~  | Refresh list             |
-| ~q~   | ~quit-window~            | Quit                     |
+| Key | Command                  | Description              |
+|-----+--------------------------+--------------------------|
+| =RET= | ~merita-browse-view~   | View entry at point      |
+| =e=   | ~merita-browse-export~ | Export citation at point  |
+| =E=   | ~merita-browse-edit~   | Edit entry at point      |
+| =D=   | ~merita-browse-delete~ | Delete entry at point    |
+| =N=   | ~merita-browse-new-entry~ | New entry             |
+| =d=   | ~merita-browse-add-doi~ | Add entry by DOI        |
+| =b=   | ~merita-browse-open-url~ | Open DOI/PMID in browser |
+| =O=   | ~merita-browse-open-file~ | Open local file         |
+| =f= / =/= | ~merita-browse-filter~ | Filter entries (layered) |
+| =F=       | ~merita-browse-filter-clear~ | Clear all filters  |
+| =m=   | ~merita-browse-metrics~ | Show metrics at point   |
+| =g=   | ~merita-browse-refresh~ | Refresh list            |
+| =q=   | ~quit-window~          | Quit                     |
 
 * Entry View (~merita-entry-mode~)
 
-Accessible via ~RET~ in browse mode or ~merita-find~.
+Accessible via =RET= in browse mode or ~merita-find~.
 
-| Key       | Command                 | Description                |
-|-----------+-------------------------+----------------------------|
-| ~RET~/~E~ | ~merita-entry-edit~     | Edit this entry            |
-| ~e~       | ~merita-entry-export~   | Export citation            |
-| ~D~       | ~merita-entry-delete~   | Delete this entry          |
-| ~n~/~M-n~ | ~merita-entry-next~     | Next entry (chronological) |
-| ~p~/~M-p~ | ~merita-entry-prev~     | Previous entry             |
-| ~a~       | ~merita-add~            | Add new entry              |
-| ~b~       | ~merita-entry-open-url~ | Open DOI/PMID in browser   |
-| ~m~       | ~merita-entry-metrics~  | Show citation metrics      |
-| ~L~       | ~merita-entry-link~     | Link to another entry      |
-| ~g~/~=~   | ~merita-entry-refresh~  | Refresh display            |
-| ~q~       | ~quit-window~           | Quit                       |
-
-* Results View (~merita-results-mode~)
-
-Accessible via ~merita-search~ (command map: =s=).
-
-| Key   | Command                 | Description           |
-|-------+-------------------------+-----------------------|
-| ~RET~ | ~merita-results-view~   | View entry at point   |
-| ~e~   | ~merita-results-edit~   | Edit entry at point   |
-| ~d~   | ~merita-results-delete~ | Delete entry at point |
-| ~q~   | ~quit-window~           | Quit                  |
-
-* Presentations View (~merita-presentations-mode~)
-
-Accessible via ~merita-list-presentations~.
-
-| Key | Command                        | Description                  |
-|-----+--------------------------------+------------------------------|
-| ~d~ | ~merita-presentations-delete~  | Delete presentation at point |
-| ~a~ | ~merita-presentations-add~     | Add presentation             |
-| ~g~ | ~merita-presentations-refresh~ | Refresh listing              |
-| ~q~ | ~quit-window~                  | Quit                         |
+| Key           | Command                      | Description                |
+|---------------+------------------------------+----------------------------|
+| =RET=         | ~merita-entry-edit-at-point~ | Edit field/link at point   |
+| =M-RET=       | ~merita-entry-jump-to-link~  | Jump to linked entry       |
+| =E=           | ~merita-entry-edit~          | Edit entry (multi-field)   |
+| =e=           | ~merita-entry-export~        | Export citation            |
+| =x=           | ~merita-entry-clear-at-point~ | Clear field / remove link |
+| =D=           | ~merita-entry-delete~        | Delete this entry          |
+| =TAB= / =S-TAB= | ~merita-entry-next/prev-field~ | Navigate fields/links  |
+| =↓= / =↑=    | ~merita-entry-next/prev-field~ | Navigate fields/links    |
+| =n= / =p=    | ~merita-entry-next/prev-field~ | Navigate fields/links    |
+| =M-n= / =M-p= | ~merita-entry-next/prev~    | Next/previous entry        |
+| =N=           | ~merita-new-entry~           | New entry                  |
+| =L=           | ~merita-entry-link~          | Link to another entry      |
+| =b=           | ~merita-entry-open-url~      | Open DOI/PMID in browser   |
+| =O=           | ~merita-entry-open-file~     | Open local file            |
+| =m=           | ~merita-entry-metrics~       | Show citation metrics      |
+| =g= / ===     | ~merita-entry-refresh~       | Refresh display            |
+| =q=           | ~quit-window~                | Quit                       |
 
 * Example Configuration
 
@@ -102,6 +83,9 @@ Accessible via ~merita-list-presentations~.
 (use-package merita
   :ensure (:host codeberg :repo "phmcc/merita")
   :bind-keymap ("C-c v" . merita-command-map)
+  :init
+  (with-eval-after-load 'tabularium
+    (require 'merita-tabularium nil t))
   :custom
   (merita-user-name "LastName AB")
   (merita-user-name-variants '("LastName A" "Lastname-Maiden AB"))
@@ -113,4 +97,4 @@ Accessible via ~merita-list-presentations~.
   (merita-default-export-directory "~/Documents/CV/"))
 #+end_src
 
-The ~:bind-keymap~ directive binds the command map to =C-c v=, placing all commands under that prefix (e.g., =C-c v a= for ~merita-add~, =C-c v M= for ~merita-metrics-update~).
+The ~:bind-keymap~ directive binds the command map to =C-c v=, placing all commands under that prefix (e.g., =C-c v N= for ~merita-new-entry~, =C-c v s= for ~merita-stats~).  The ~:init~ block registers the ~tabularium~ bridge hook early so it activates when either package loads, even with deferred loading.

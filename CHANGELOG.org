@@ -1,211 +1,121 @@
-#+TITLE: Merita Changelog
+#+TITLE: Changelog
 #+AUTHOR: Paul H. McClelland
-#+OPTIONS: toc:2 num:nil
+#+OPTIONS: toc:0 num:nil
 
 All notable changes to ~merita~ are documented in this file.
 
-* 0.4.0 (2026-03-20)
+* 0.5.0 (2026-04-05)
 
 ** Added
 
-*** Browse Mode (~merita-browse-mode~)
-- ~merita-browse~ replaces ~merita-list~ as the primary entry-browsing interface
-- Columns: Status, Type, Year, Month, Title, Authors, Journal, Position, Citations
-- SQL-controlled reverse-chronological sort with null dates (undated entries) appearing after the most recent year
-- Occupies the current window (no split)
+*** Statistics Dashboard
+- ~merita-summary~ renamed to ~merita-stats~ (=s= in command map); widened to 80 characters with right-aligned columns
+- New metrics: i10-index (~merita-i10-index~), mean/median citations (peer-reviewed), citations per year, career span, mean/median/highest impact factor
+- Most Cited section shows year; Impact Factor section shows highest IF as =55.0 (JAMA)=; Links section with per-type breakdown
 
-*** Entry View Improvements
-- Formatted citation preview at the top of the entry buffer using the default citation style
-- 80-character display width with word-wrapped citations and truncated field values
-- ~merita-entry-display~ customization: ~buffer~ (default) or ~side~ (right-side window, 84 columns)
-- Field display follows database column order via ~merita--entry-field-order~
-- Short citation header (e.g., "McClelland PH et al. (2024-09)") replaces raw ID
-- Linked entries shown inline with tight bracket formatting
+*** Bibliography Generation
+- ~merita-bibliography~ (=B= in command map) generates formatted output with interactive filters: type (section alias or individual), date range, case-insensitive search terms (comma-separated, matched across title/authors/journal/keywords), output format (plain text or LaTeX), and citation style
+- Output displayed in ~*merita-bibliography*~ with ~visual-line-mode~; also copied to kill ring
 
-*** Export Dispatcher
-- ~merita-export-entry~ — single-entry export with two-step prompt: format (plain text, LaTeX, BibTeX, RIS), then citation style
-- Plain text and LaTeX citations copied to the kill ring; BibTeX and RIS prompt for a filename
-- Available in both entry view (~e~) and browse mode (~e~)
-- Style prompt defaults to ~merita-default-citation-style~
+*** Local File Support
+- ~file_path~ field stores the path to a locally saved PDF; navigable via =f= in entry view (~merita-entry-open-file~) and browse mode (~merita-browse-open-file~)
 
-*** Default Citation Style
-- ~merita-default-citation-style~ customization variable (default: ~vancouver~)
-- Used by the export dispatcher and the entry view citation preview
-- Valid values: ~vancouver~, ~apa~, ~ieee~, ~chicago~, ~nlm~, ~plain~
+*** Entry Linking
+- ~pipeline~ relation type tracks abstract-to-publication progression
+- Self-link prevention and duplicate link detection in ~merita--insert-relation~
+- Context-aware keybindings in entry view: =RET= on a link line edits the link type, =x= removes the link, =M-RET= jumps to the linked entry
+- Linked entries display as ~{pipeline} [journal-article] Author et al. (2024-09). "Title..."~
 
-*** Choice Field Completion
-- ~merita--choice-fields~ maps constrained fields to valid values
-- ~merita--read-field-value~ dispatches to ~completing-read~ for choice fields (~author_position~, ~status~, ~peer_reviewed~, ~grant_role~, ~pkg_registry~)
-- Used by both ~merita-edit~ and ~merita-edit-field~
+*** Tabularium Integration (=merita-tabularium.el=)
+- Linked entries displayed in tabularium form buffers via ~tabularium-entry-render-hook~
+- Full link management: =L= new link, =RET= edit link type, =x= remove link, =M-RET= jump, =b= open URL, =f= open file
+- Context-aware =RET= and =x= via ~:around~ advice on ~tabularium-entry-edit-field~ and ~tabularium-entry-reset-field~
+- Plugin hint line (=── Merita ──=) appended below standard tabularium hints
+- Loading via ~:init~ block: ~(with-eval-after-load 'tabularium (require 'merita-tabularium nil t))~
 
-*** Chronological Entry Navigation
-- ~merita-entry-next~ (~n~/~M-n~) moves forward in time (older → newer → undated)
-- ~merita-entry-prev~ (~p~/~M-p~) moves backward in time
-- Navigation order matches the browse view sort exactly
-- Shared SQL sort constants (~merita--sort-year-sql~, ~merita--sort-month-sql~, ~merita--sort-day-sql~) ensure consistency
-
-*** DOI/PMID/URL Browse
-- ~merita--open-url~ opens DOI, PMID, or URL in the default browser
-- Available in entry view (~b~) and browse mode (~b~)
-- Tries DOI first, then PMID, then URL field as fallback
-
-*** Day Column
-- ~day~ field added to the database schema and all import paths (Crossref, BibTeX, ORCID)
-- Migration: ~ALTER TABLE data ADD COLUMN day INTEGER~
-- RIS export emits ~DA~ tag with full date when month and day are present
-
-*** Schema Rename: ~entry_type~ → ~type~
-- Column renamed throughout: CREATE TABLE, all SQL queries, all alist keys
-- Migration: ~ALTER TABLE data RENAME COLUMN entry_type TO type~
-- Old index dropped: ~DROP INDEX IF EXISTS idx_entry_type~
-- ~merita-metrics.el~ and ~merita-tabula.el~ updated to match
+*** Tabularium Enhancements (=tabularium.el=)
+- ~tabularium-entry-render-hook~ for plugin content injection in form buffers
+- ~tabularium-navigable~ text property enables plugin lines in =TAB= / =S-TAB= navigation
+- Wrap-around field navigation; arrow keys (=↓= / =↑=) bound to next/prev field
+- Filter-aware entry navigation: =M-n= / =M-p= traverse filtered/sorted results, not the raw table
+- Star/colon alignment: required field stars no longer push the colon rightward
 
 ** Changed
 
-*** Keybinding Conventions
-- Lowercase keys for non-destructive actions, uppercase for creative/destructive
-- ~e~ = export (non-destructive), ~E~ = edit (creative), ~D~ = delete (destructive)
-- ~RET~/~E~ both edit in entry view; ~RET~ views in browse mode
-- ~m~ for metrics (was ~M~), ~b~ for open URL
-- ~M-n~/~M-p~ added as aliases for ~n~/~p~ in entry view (tabula convention)
-- Removed: ~s~ for search in browse mode (redundant with ~/~), ~l~ for links in entry view (redundant with inline display), ~merita-entry-edit-field~ (covered by ~merita-edit~)
-- ~merita-edit-field~ removed from command map
-
-*** Summary Dashboard
-- Left margin removed (2-space indent under headings, flush section headers)
-- "Total relationships" renamed to "Linked entries"
-- Year section shows "n.d." for undated entries instead of omitting them
-- Box width adjusted to 57 characters
-
-*** Naming
-- ~merita-list~ → ~merita-browse~ (mode, buffer, all functions)
-- ~merita-list-mode~ → ~merita-browse-mode~ (modeline: "Merita Browse")
-- ~companion~ relation type → ~related~
-- "Relationships by Type" → "Links", "Authorship Summary" → "Authorship"
-- Section headers simplified: "By Type" → "Type", "By Status" → "Status", etc.
+- ~merita-add~ renamed to ~merita-new-entry~ (=N= in all keymaps); ~merita-summary~ renamed to ~merita-stats~ (=s=); ~merita-search~ rebound to =/=
+- ~merita-entry-clear-field~ renamed to ~merita-entry-clear-at-point~ (dual field/link behavior)
+- ~type~ field now editable from entry view via =RET=
+- Entry IDs removed from all user-facing messages; edit prompts pre-populated with current values
+- DOI stripped from citation preview in entry view (visible in fields below)
+- =TAB= / =S-TAB= and arrow keys added to ~merita-entry-mode~ alongside =n= / =p=; hint lines restructured into three rows matching tabularium conventions
+- ~merita--entry-candidates~ no longer truncates title/authors, improving ~completing-read~ narrowing
+- ~merita-new-entry~ always displays entry view and refreshes browse after insert
+- ~merita--active-status-sql~ constant extracted from four inline copies of the status filter
+- ~merita-results-mode~ removed; ~merita-search~ now opens ~merita-browse~ with a pre-applied filter; =f= / =/= add layered filters with AND/OR/AND NOT/OR NOT join logic; =F= clears all filters
+- ~merita-presentations-mode~ and the ~presentations~ table removed; superseded by the entry linking system (~pipeline~ relation type)
+- ~merita-metrics-stats~ and ~merita-metrics-top-cited~ removed from =merita-metrics.el=; statistics consolidated into ~merita-stats~, which now includes influential citations and mean FWCI
+- Forward declarations added for ~merita-org-type-aliases~; unused lexical variables removed
 
 ** Fixed
 
-*** Byte-Compilation
-- ~(lambda (t) ...)~ in ~merita--pr-where~ — ~t~ is a reserved constant; renamed to ~typ~
-- Unused lexical variable ~db~ in ~merita-export-latex~
-- Unused lexical variable ~doi~ in ~merita-format-chicago~
-- ~parsebib-parse~ declared via ~declare-function~ to suppress unknown-function warning
-- Forward declarations added for ~merita--latex-context~, ~merita-text-formatter~, ~merita--style-formatter-map~
-- ~merita-tabula.el~ marked ~no-byte-compile: t~ (optional bridge module; tabula not on build load path)
-- ~merita-command-map~ autoloaded for deferred package loading
+- SQL parameter-ordering bug in ~merita--query-bibliography~ caused by ~push~ for conditions vs. ~append~ for parameters
+- ~provide~ moved before optional ~require~ calls to prevent recursive load with deferred packages
 
-*** Data Handling
-- ~merita--entry-short-title~ handles empty-string year/month from SQLite (was crashing with ~Format specifier doesn't match argument type~)
-- ~merita--open-url~ uses explicit ~stringp~ checks; handles ~:null~, empty strings, and integer PMIDs
-- Browse sort and entry navigation use identical SQL with ~CASE WHEN year IS NULL OR year = '' THEN 9999~ sentinels for consistent ordering
+* 0.4.0 (2026-03-29)
 
-*** Migration Order
-- Schema migrations now run before index creation in ~merita-init~ (was failing when ~entry_type~ index referenced the column before it was renamed)
+** Added
 
-*** Metrics Module
-- ~entry_type~ → ~type~ in all SQL queries in ~merita-metrics.el~
+- =i= key in browse mode opens an import dispatcher (BibTeX, CSV, TSV, ORCID)
+- ~merita-browse-columns~ defcustom controls visible columns, order, and widths
+- Browse buffer auto-refreshes after update or delete
+- Entry view: =RET= edits field at point, =E= retains multi-field edit, =x= clears field, =n= / =p= navigate fields, =M-n= / =M-p= navigate entries
+- ~merita-entry-show-empty-fields~ defcustom (default ~t~)
+- ~issn~ field added to schema; schema version bumped to 2
+
+** Changed
+
+- ~merita-list~ renamed to ~merita-browse~ throughout
+- ~companion~ relation type renamed to ~related~
+- Summary section headers simplified: "By Type" → "Type", "By Status" → "Status"
+- ~entry_type~ column renamed to ~type~; all SQL, formatters, and importers updated
+
+** Fixed
+
+- Byte-compilation warnings: reserved variable ~t~ in lambda, unused lexical variables, missing ~declare-function~ for ~parsebib-parse~
+- ~merita--entry-short-title~ crash on empty year/month from SQLite
+- ~merita--open-url~ handles ~:null~, empty strings, and integer PMIDs
+- Schema migrations now run before index creation in ~merita-init~
+- ~entry_type~ → ~type~ in all =merita-metrics.el= SQL queries
 
 * 0.3.0 (2026-03-15)
 
 ** Added
 
-*** Software Metrics
-- GitHub repository metrics: stars, forks, watchers, open issues, language, license, creation date
-- CRAN download counts via cranlogs.r-pkg.org (last-month totals)
-- PyPI download counts via pypistats.org (last-month totals)
-- ~merita-metrics-update~ now handles both publications and software entries in a single pass
-- Software entries identified by ~type~ of ~software~ or ~dataset~; repository URL parsed automatically
-- ~pkg_registry~ and ~pkg_name~ fields drive registry-specific download lookups
-
-*** New Database Columns (Software)
-- ~repo_url~ / ~repo_host~ — repository URL and platform (github, gitlab, codeberg)
-- ~repo_stars~ / ~repo_forks~ / ~repo_watchers~ / ~repo_open_issues~ — GitHub community engagement metrics
-- ~repo_language~ / ~repo_license~ / ~repo_created~ — repository metadata from GitHub
-- ~pkg_registry~ / ~pkg_name~ — package distribution registry and name (cran, pypi, melpa, npm)
-- ~pkg_downloads~ / ~pkg_downloads_period~ — download count and time window (last-month, total)
-- ~pkg_version~ — current package version
-
-*** Browse and Edit Interface
-- ~merita-browse~ — tabulated list view showing all entries with sortable columns
-- ~merita-entry-mode~ — entry view with edit, export, navigation, linking, and metrics
-- ~merita-results-mode~ — search results with view, edit, and delete
-- ~merita-edit-field~ — edit a single field via ~completing-read~
-- Hint line at the bottom of entry and results buffers showing available keybindings
-
-*** Software Entry Support
-- ~merita-add~ prompts for repository and package fields when the type is ~software~ or ~dataset~
-- All six citation formatters render software entries with language tag, registry/package name, repository URL
-- RIS exporter maps ~software~ → =COMP= and ~dataset~ → =DATA=
-- BibTeX exporter emits custom fields for software entries
+- Software/dataset entry support: GitHub metrics (stars, forks, watchers, issues, language, license), CRAN/PyPI download counts, 15 new database columns
+- ~merita-browse~ tabulated list view, ~merita-entry-mode~ entry viewer, ~merita-results-mode~ search results
+- All six citation formatters render software entries with language tag and repository URL
 
 ** Changed
 
-*** Edit Behavior
-- ~merita-edit~ prompts for which fields to edit via ~completing-read-multiple~
-- Editable fields expanded to 42
-
-*** Presentations
-- ~merita-list-presentations~ upgraded to ~merita-presentations-mode~ with keybindings
+- ~merita-edit~ prompts for fields via ~completing-read-multiple~; editable fields expanded to 42
+- ~merita-list-presentations~ upgraded to ~merita-presentations-mode~
 
 ** Fixed
 
-*** Table Name Mismatch
-- Fixed ~merita-metrics.el~ referencing a table named ~entries~; the actual table name is ~data~
-
-*** Schema
-- User-editable software columns moved from metrics migration into the base ~CREATE TABLE~ statement
-
-*** Code Quality
-- Removed unused ~merita--results-ids~ variable
-- Corrected ~merita-metrics.el~ commentary
+- =merita-metrics.el= table name mismatch (~entries~ → ~data~)
+- Software columns moved from metrics migration into base schema
 
 * 0.2.0 (2026-03-14)
 
 ** Added
 
-*** Citation Metrics Module (~merita-metrics.el~)
-- ~merita-metrics-update~ — fetch citation data from OpenAlex and Semantic Scholar
-- ~merita-metrics-stats~ — researcher metrics dashboard
-- ~merita-metrics-top-cited~ — ranked display of most-cited publications
-- Batched DOI lookups: OpenAlex (50 per request), Semantic Scholar (500 per POST)
-- Staleness tracking via ~metrics_updated~ timestamp
-
-*** ORCID Import
-- ~merita-import-orcid~ — fetch public works list, identify missing DOIs, import via Crossref
-- ~merita-orcid-diff~ — read-only comparison without importing
-
-*** Citation Formatters and Export
-- ~merita-format-apa~, ~merita-format-ieee~, ~merita-format-chicago~, ~merita-format-nlm~, ~merita-format-plain~
-- ~merita-export-text~ with convenience commands for common styles
-- ~merita-export-ris~ and ~merita-export-csv~
-
-** Changed
-
-*** Architecture
-- Pure Elisp implementation using ~url.el~ and ~json.el~
-- Unified ~citations~ column updated with best available count
-- Citation formatters use a common ~merita--entry-fields~ helper
+- Citation metrics module (=merita-metrics.el=): ~merita-metrics-update~ with batched DOI lookups (OpenAlex 50/req, Semantic Scholar 500/POST); per-entry metrics display via =m= in entry view
+- ORCID import: ~merita-import-orcid~ and ~merita-orcid-diff~
+- Citation formatters: APA, IEEE, Chicago, NLM, plain text; ~merita-export-text~, ~merita-export-ris~, ~merita-export-csv~
 
 * 0.1.0 — Initial Release (2026-02-21)
 
-** Features
-
-*** Core
-- SQLite-backed storage via Emacs 29.1+ built-in ~sqlite.el~
-- 40+ field schema covering all scholarly output types
-- 24 entry types with BibTeX type mapping
-- 9 author position values ordered by significance
-
-*** Data Entry
-- Interactive minibuffer-based entry with type-specific field prompts
-- DOI-based entry via the Crossref API
-- Batch DOI import
-- BibTeX, CSV, and TSV import with duplicate DOI detection
-
-*** Export
-- LaTeX CV export with Vancouver citation style
-- BibTeX and TSV export
-
-*** Statistics
+- SQLite-backed storage via Emacs 29.1+ built-in ~sqlite.el~; 40+ field schema, 24 entry types, 9 author positions
+- Interactive entry, DOI-based entry (Crossref API), batch DOI import, BibTeX/CSV/TSV import
+- LaTeX CV export (Vancouver style), BibTeX and TSV export
 - h-index, career summary dashboard, authorship breakdown
