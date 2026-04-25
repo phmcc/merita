@@ -1,13 +1,14 @@
 ;;; merita-tabularium.el --- Tabularium integration for Merita -*- lexical-binding: t; no-byte-compile: t; -*-
 
-;; Author: Paul H. McClelland
-;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Copyright (C) 2026 Paul H. McClelland
 
+;; Author: Paul H. McClelland <paulhmcclelland@protonmail.com>
+;; Maintainer: Paul H. McClelland <paulhmcclelland@protonmail.com>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (merita "0.1.0") (tabularium "0.3.0"))
+;; Package-Requires: ((emacs "29.1") (merita "0.1.0") (tabularium "0.4.4"))
 ;; Keywords: bib, data
 ;; URL: https://codeberg.org/phmcc/merita
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;;; Commentary:
 
@@ -248,7 +249,7 @@ After calling this, you can open the merita database with
     ;; Write the .schema.el file so tabularium can find it in future sessions
     (tabularium--save-schema-to-file "merita")
     (message "Merita registered with Tabularium.  Schema written to %s"
-             (concat (file-name-sans-extension (merita--db-file)) ".schema.el"))))
+             (concat (file-name-sans-extension (merita--db-file)) tabularium-schema-file-suffix))))
 
 ;;;###autoload
 (defun merita-tabularium-setup ()
@@ -273,8 +274,8 @@ If the database is empty, offers to run `merita-seed'."
 
 (defun merita-tabularium--on-merita-p ()
   "Return non-nil if the current form buffer is editing a merita entry."
-  (and (bound-and-true-p tabularium-entry--schema-name)
-       (equal tabularium-entry--schema-name "merita")))
+  (and (bound-and-true-p tabularium-entry-schema-name)
+       (equal tabularium-entry-schema-name "merita")))
 
 (defun merita-tabularium--on-link-p ()
   "Return non-nil if point is on a merita link line."
@@ -285,14 +286,14 @@ If the database is empty, offers to run `merita-seed'."
   "Inject linked entries and hint line into the merita form buffer.
 Added to `tabularium-entry-render-hook'."
   (when (and (merita-tabularium--on-merita-p)
-             (bound-and-true-p tabularium-entry--editing-id))
-    (let ((id tabularium-entry--editing-id)
+             (bound-and-true-p tabularium-entry-editing-id))
+    (let ((id tabularium-entry-editing-id)
           (w 80))
       ;; Inject links before the footer
       (let ((related (merita--get-related id)))
         (when related
           (save-excursion
-            (goto-char tabularium-entry--footer-start)
+            (goto-char tabularium-entry-footer-start)
             (insert "  " (propertize "Linked entries:"
                                      'face 'font-lock-type-face) "\n")
             (dolist (rel related)
@@ -316,7 +317,7 @@ Added to `tabularium-entry-render-hook'."
                 (put-text-property line-start (point)
                                    'tabularium-navigable t)))
             (insert "\n")
-            (setq tabularium-entry--footer-start (point)))))
+            (setq tabularium-entry-footer-start (point)))))
       ;; Append merita hint line after the standard hints
       (goto-char (point-max))
       (insert "\n\n  " (propertize "── Merita ──" 'face '(:weight bold)) "\n")
@@ -345,7 +346,7 @@ Added to `tabularium-entry-render-hook'."
   (let ((link-id (get-text-property (point) 'merita-link-id)))
     (when link-id
       (merita-edit-link-type link-id)
-      (tabularium-entry--render))))
+      (tabularium-entry-render))))
 
 (defun merita-tabularium-remove-link-at-point ()
   "Remove the link at point in a tabularium form buffer."
@@ -354,7 +355,7 @@ Added to `tabularium-entry-render-hook'."
     (when link-id
       (when (yes-or-no-p "Remove this link? ")
         (merita--delete-relation link-id)
-        (tabularium-entry--render)
+        (tabularium-entry-render)
         (message "Link removed.")))))
 
 (defun merita-tabularium-new-link ()
@@ -362,29 +363,29 @@ Added to `tabularium-entry-render-hook'."
   (interactive)
   (unless (merita-tabularium--on-merita-p)
     (user-error "Not a merita entry"))
-  (unless (bound-and-true-p tabularium-entry--editing-id)
+  (unless (bound-and-true-p tabularium-entry-editing-id)
     (user-error "Save the entry before linking"))
   (let ((rid (merita--read-entry-id "Link to: "))
         (rtype (completing-read "Link type: "
                                 merita-relation-types nil t)))
-    (merita--insert-relation tabularium-entry--editing-id rid rtype)
-    (tabularium-entry--render)))
+    (merita--insert-relation tabularium-entry-editing-id rid rtype)
+    (tabularium-entry-render)))
 
 (defun merita-tabularium-open-url ()
   "Open the DOI, PMID, or URL of the current merita entry."
   (interactive)
   (unless (merita-tabularium--on-merita-p)
     (user-error "Not a merita entry"))
-  (when (bound-and-true-p tabularium-entry--editing-id)
-    (merita--open-url tabularium-entry--editing-id)))
+  (when (bound-and-true-p tabularium-entry-editing-id)
+    (merita--open-url tabularium-entry-editing-id)))
 
 (defun merita-tabularium-open-file ()
   "Open the local file for the current merita entry."
   (interactive)
   (unless (merita-tabularium--on-merita-p)
     (user-error "Not a merita entry"))
-  (when (bound-and-true-p tabularium-entry--editing-id)
-    (merita--open-file tabularium-entry--editing-id)))
+  (when (bound-and-true-p tabularium-entry-editing-id)
+    (merita--open-file tabularium-entry-editing-id)))
 
 ;;; ** 2.2. Context-Aware Advice
 

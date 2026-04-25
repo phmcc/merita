@@ -1,8 +1,8 @@
-#+TITLE: Merita Roadmap
+#+TITLE: Roadmap
 #+AUTHOR: Paul H. McClelland
 #+OPTIONS: toc:0 num:nil
 
-Tentatively planned features for future releases.
+The following features are tentatively planned for future releases:
 
 * v0.5.1
 

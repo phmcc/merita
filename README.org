@@ -1,6 +1,6 @@
 #+TITLE: merita
 #+AUTHOR: Paul H. McClelland
-#+OPTIONS: toc:0 num:nil
+#+OPTIONS: toc:nil num:nil
 
 *A personal scholarly achievement database for Emacs.*
 
@@ -38,7 +38,7 @@ Default keybindings are documented in [[file:KEYBINDINGS.org][KEYBINDINGS.org]].
 
 * Why Not Google Scholar, ORCID, or a Reference Manager?
 
-Google Scholar and ORCID track published works that have DOIs or are indexed by web crawlers — a subset of a researcher's full scholarly record.  Reference managers like Zotero, Mendeley, and EndNote manage the literature a researcher has /read/, not the work a researcher has /produced/; they lack author position tracking, publication status, grant metadata, and the kind of career-level statistics that promotion committees require.  Citation databases such as Scopus and Web of Science provide author profiles but share the same coverage gaps as Google Scholar.  Institutional systems (Pure, Interfolio, Activity Insight) are employer-controlled, non-portable, and typically inaccessible after a career move.
+Google Scholar and ORCID track published works that have DOIs or are indexed by web crawlers—a subset of a researcher's full scholarly record.  Reference managers like Zotero, Mendeley, and EndNote manage the literature a researcher has /read/, not the work a researcher has /produced/; they lack author position tracking, publication status, grant metadata, and the kind of career-level statistics that promotion committees require.  Citation databases such as Scopus and Web of Science provide author profiles but share the same coverage gaps as Google Scholar.  Institutional systems (Pure, Interfolio, Activity Insight) are employer-controlled, non-portable, and typically inaccessible after a career move.
 
 ~merita~ is not a replacement for any of these services (it imports from ORCID and fetches citation data from the same sources used by Google Scholar), but it fills the gaps they cannot:
 
