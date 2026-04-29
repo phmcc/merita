@@ -4,6 +4,47 @@
 
 All notable changes to ~merita~ are documented in this file.
 
+* 0.5.1 (2026-04-24)
+
+** Added
+
+*** Tag Filtering
+- =tags= column promoted to a first-class filter axis with AND/OR/NAND/NOR semantics
+- Boundary-safe matching via ~merita--tag-match-clause~: the stored string is wrapped in commas and whitespace-stripped before comparison
+- ~merita-list-tags~ displays all tags with frequency counts and opens ~merita-browse~ with the chosen tag applied as a filter
+- ~merita-browse-filter-tag~ (=t= in browse mode, also =C-u f= / =C-u /=) adds a tag filter layer with the same AND/OR/AND-NOT/OR-NOT join logic as text filters; tag layers display with a leading =#= in the filter description
+
+*** Filter Spec and Ranking
+- Internal filter-spec plist API (~merita--query-filter-spec~) unifies the bibliography and dblock query paths; both now support the full parameter set
+- ~merita-bibliography~ gains a tag prompt (AND, OR, NOT (NAND), NOR, or skip) and an optional tag-term prompt
+- Composite ~biosketch~ ranking tier: peer-reviewed first/senior-author work, then peer-reviewed middle authorship, then everything else; within each tier, sorted by year descending then citations descending
+
+*** Dynamic Block Parameters
+New ~#+BEGIN: merita~ parameters:
+- =:tags=, =:tags-any=, =:tags-not=, =:tags-nor= — tag filters with AND/OR/NAND/NOR semantics
+- =:since YEAR=, =:until YEAR= — date boundaries
+- =:peer-reviewed t= — require ~peer_reviewed = 1~
+- =:author-position first,senior= — require author position in the listed values
+- =:rank year|citations|biosketch= — ordering strategy
+- =:limit N= — truncate output
+
+*** Biosketch Generator
+- ~merita-biosketch~ (=K= in command map) generates a complete NIH-style biographical sketch as an ~.org~ file, with LaTeX preamble (Helvetica 11pt, 0.5″ margins, single-spaced, fancy footer), header stubs, and Sections A/B/C populated by dynamic blocks filtered on user-supplied topical tags
+- Prompts: author name (defaults to ~merita-user-name~), position title, 3-5 contribution groups (tag with completion from existing tags, plus section title), citation style (default from ~merita-biosketch-default-style~, defaulting to NLM)
+- Section A citations drawn from the union of all group tags (~:tags-any t~), limited to 4 at ~:rank biosketch~
+- Section B honors pulled automatically from entries with ~type='award'~
+- Section C contributions each render 4 representative publications for their tag at ~:rank biosketch~
+- New defcustoms: ~merita-biosketch-position-title~, ~merita-biosketch-default-style~
+
+*** Awards Formatter
+- ~merita--format-award-line~ renders ~type='award'~ entries as ~YYYY  Title, Body — Notes~ across LaTeX export, bibliography output, and dynamic blocks; no new schema fields required
+
+** Changed
+
+- ~merita--query-bibliography~ refactored to a thin wrapper over ~merita--query-filter-spec~; external signature preserved with four additional optional tag arguments
+- ~org-dblock-write:merita~ rewritten to consume the filter-spec plist; empty results now yield a wrapped comment in LaTeX output so they survive org export
+- Browse mode filter layers now carry a ~:kind~ property (=text= or =tag=); old layers without the property are treated as text filters for backward compatibility
+
 * 0.5.0 (2026-04-05)
 
 ** Added

@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Copyright (C) 2026 Paul H. McClelland
 
-;; Version: 0.4.1
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: bib, data
 ;; URL: https://codeberg.org/phmcc/merita

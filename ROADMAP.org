@@ -1,20 +1,17 @@
-#+TITLE: Roadmap
+#+TITLE: Merita Roadmap
 #+AUTHOR: Paul H. McClelland
 #+OPTIONS: toc:0 num:nil
 
-The following features are tentatively planned for future releases:
-
-* v0.5.1
-
-- [ ] Filter presets for ~merita-browse~ and export: =biosketch= (peer-reviewed, last 5 years, significant authorship), =pipeline= (submitted + in-prep), =promotion= (all active entries)
-- [ ] Author truncation: configurable threshold (default 6) with "et al." for citation formatters, following AMA 11th edition conventions
+Tentatively planned features for future releases.
 
 * v0.6.0
 
 - [ ] Link visualization via Graphviz: ~merita-graph~ command emits =.dot= file, shells out to =dot -Tsvg=, displays in Emacs buffer; nodes positioned chronologically on x-axis, shaped by entry type, edges labeled by relation type; ~pipeline~ links rendered as thick directional arrows
+- [ ] Author truncation: configurable threshold (default 6) with "et al." for citation formatters, following AMA 11th edition conventions
 
 * v0.7.0
 
+- [ ] Biographical entries: new entry types ~position~, ~education~, ~appointment~ for tracking the narrative that currently lives in the CV's Education/Training and Professional Experience sections; corresponding dblock rendering for NIH biosketch Education/Training tables and Section B (Positions and Scientific Appointments)
 - [ ] Journal impact factor lookup via OpenAlex source metadata; auto-populate ~impact_factor~ during DOI import or metrics update, with historical-vs-current distinction
 - [ ] PubMed integration via NCBI E-utilities: PMID-based metadata fetch, MeSH term auto-population, PMC full-text link resolution
 - [ ] Altmetric Attention Score via the free Details Page API; social media mentions, news coverage, policy document citations

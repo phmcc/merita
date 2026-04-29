@@ -1,6 +1,6 @@
 #+TITLE: merita
 #+AUTHOR: Paul H. McClelland
-#+OPTIONS: toc:nil num:nil
+#+OPTIONS: toc:0 num:nil
 
 *A personal scholarly achievement database for Emacs.*
 
@@ -24,7 +24,9 @@ Internally, ~merita~ uses Emacs 29.1's built-in ~sqlite.el~ as its storage backe
 - *Citation metrics* — pull citation counts, FWCI, influential citations, and open-access status from OpenAlex and Semantic Scholar
 - *Researcher statistics* — h-index, i10-index, mean FWCI, authorship breakdown, publications by year
 - *Citation formatters* — APA 7th, Vancouver/NLM, IEEE, Chicago (author-date), and plain text
-- *Bibliography generation* — filtered by type and/or date range, with interactive style selection; result displayed and copied to kill ring
+- *Bibliography generation* — filtered by type, date range, text, and tags (AND/OR/NAND/NOR), with interactive style selection; result displayed and copied to kill ring
+- *Tag-based thematic grouping* — free-text ~tags~ field with boundary-safe matching, accessible as a filter axis in bibliography, dblocks, and browse mode
+- *NIH biosketch generator* — ~merita-biosketch~ produces a complete ~.org~ scaffold with LaTeX preamble, Section A/B/C structure, and contribution-group dblocks keyed on user-supplied tags
 - *Default citation style* — configurable via ~merita-default-citation-style~; used by the export dispatcher and entry view
 - *BibTeX, LaTeX, TSV, CSV, and RIS export* — for interoperability with reference managers and version control
 - *Entry linking* — related entries across venues (abstract ↔ podium ↔ manuscript) with link type taxonomy
@@ -38,7 +40,7 @@ Default keybindings are documented in [[file:KEYBINDINGS.org][KEYBINDINGS.org]].
 
 * Why Not Google Scholar, ORCID, or a Reference Manager?
 
-Google Scholar and ORCID track published works that have DOIs or are indexed by web crawlers—a subset of a researcher's full scholarly record.  Reference managers like Zotero, Mendeley, and EndNote manage the literature a researcher has /read/, not the work a researcher has /produced/; they lack author position tracking, publication status, grant metadata, and the kind of career-level statistics that promotion committees require.  Citation databases such as Scopus and Web of Science provide author profiles but share the same coverage gaps as Google Scholar.  Institutional systems (Pure, Interfolio, Activity Insight) are employer-controlled, non-portable, and typically inaccessible after a career move.
+Google Scholar and ORCID track published works that have DOIs or are indexed by web crawlers — a subset of a researcher's full scholarly record.  Reference managers like Zotero, Mendeley, and EndNote manage the literature a researcher has /read/, not the work a researcher has /produced/; they lack author position tracking, publication status, grant metadata, and the kind of career-level statistics that promotion committees require.  Citation databases such as Scopus and Web of Science provide author profiles but share the same coverage gaps as Google Scholar.  Institutional systems (Pure, Interfolio, Activity Insight) are employer-controlled, non-portable, and typically inaccessible after a career move.
 
 ~merita~ is not a replacement for any of these services (it imports from ORCID and fetches citation data from the same sources used by Google Scholar), but it fills the gaps they cannot:
 
@@ -232,6 +234,73 @@ The LaTeX exporter generates a =.tex= file suitable for =\input{}= in a CV docum
 | ~merita-latex-section-order~     | (list)                    | Order of entry type sections     |
 | ~merita-latex-section-titles~    | (alist)                   | Display names for each type      |
 | ~merita-latex-preamble~          | (string)                  | LaTeX preamble template          |
+
+* Org Dynamic Blocks
+
+Merita dynamic blocks embed filtered, formatted publication lists directly in Org documents.  On =C-c C-c= (or =M-x org-update-all-dblocks=), the block is regenerated from the database.
+
+Minimal form:
+
+#+begin_src org
+,#+BEGIN: merita :section journal-articles :style vancouver
+,#+END:
+#+end_src
+
+Recognized parameters:
+
+| Parameter          | Values                                        | Description                                        |
+|--------------------+-----------------------------------------------+----------------------------------------------------|
+| =:section=           | alias from ~merita-org-type-aliases~            | Convenience for common groupings                   |
+| =:types=             | comma-separated entry type names              | Individual type selection                          |
+| =:tags=              | comma-separated tags                          | Require all tags (AND)                             |
+| =:tags-any=          | comma-separated tags                          | Require at least one tag (OR)                      |
+| =:tags-not=          | comma-separated tags                          | Exclude entries having all tags (NAND)             |
+| =:tags-nor=          | comma-separated tags                          | Exclude entries having any tag (NOR)               |
+| =:since=             | year                                          | Include entries from YEAR forward                  |
+| =:until=             | year                                          | Include entries through YEAR                       |
+| =:peer-reviewed=     | ~t~                                             | Require ~peer_reviewed = 1~                          |
+| =:author-position=   | comma-separated positions                     | Restrict to specified positions                    |
+| =:rank=              | =year=, =citations=, =biosketch=                  | Ordering strategy                                  |
+| =:limit=             | integer                                       | Truncate output                                    |
+| =:format=            | =latex= (default), =plain=                       | Output format                                      |
+| =:style=             | =vancouver=, =apa=, =ieee=, =chicago=, =nlm=, =plain= | Citation style                                     |
+
+Tag filters compose with AND.  The ~biosketch~ rank tiers entries as peer-reviewed first/senior-author, peer-reviewed middle, then everything else; within each tier, entries sort by year descending then citations descending.  When no parameters are given, all active entries are included in chronological ascending order.
+
+Example — the four most biosketch-worthy publications across three tag groups, rendered in NLM style:
+
+#+begin_src org
+,#+BEGIN: merita :tags cdh1,peritoneal-malignancy,til-immunotherapy :tags-any t :limit 4 :rank biosketch :style nlm :format latex
+,#+END:
+#+end_src
+
+* NIH Biosketch Generator
+
+~merita-biosketch~ (=K= in the command map) generates a complete NIH-style biographical sketch scaffold as an Org file, which is then edited and exported to PDF via the Org LaTeX exporter.
+
+The workflow separates three concerns cleanly:
+
+- *Topical grouping* (user input) — thematic research-program tags on publications: ~cdh1~, ~peritoneal-malignancy~, ~til-immunotherapy~, and so on.  Tags are reusable across multiple biosketches, CVs, and promotion packets.
+- *Editorial choices* (merita) — which publications are "representative" for a biosketch follows the ~biosketch~ rank function: peer-reviewed first/senior authorship is preferred, then peer-reviewed middle authorship, then the rest; within each tier, recency and citation count break ties.
+- *Document layout* (merita) — LaTeX preamble (Helvetica 11pt, 0.5″ margins, single-spaced, fancy footer with name and page number), header, Education/Training table stub, Section A (Personal Statement), Section B (Positions, Appointments, Honors), and Section C (Contributions to Science).
+
+Running ~merita-biosketch~ prompts for:
+
+1. Author name (default: ~merita-user-name~)
+2. Position title (default: ~merita-biosketch-position-title~)
+3. Number of contribution groups (3, 4, or 5)
+4. For each group: a tag (with completion from existing tags) and a section title
+5. Citation style (default: ~merita-biosketch-default-style~, typically NLM)
+6. Output filename
+
+The generated Org file contains ~TODO~ markers where narrative prose is expected, and ~#+BEGIN: merita= dblocks for:
+
+- Section A Citations: ~:tags-any t~ union of the contribution-group tags, limited to 4 at ~:rank biosketch~
+- Section A Ongoing Projects: active ~type='grant'~ entries, ordered by year (deletable if not applicable)
+- Section B Honors: all ~type='award'~ entries in reverse chronological order
+- Section C Contributions: one dblock per group, limited to 4 at ~:rank biosketch~
+
+After editing, =M-x org-update-all-dblocks= populates all citation lists, and =C-c C-e l p= exports to PDF.
 
 * Import
 

@@ -26,6 +26,8 @@ The command map provides a single prefix for frequently used commands.  Addition
 | =r= | ~merita-export-ris~      | Export to RIS                   |
 | =c= | ~merita-export-csv~      | Export to CSV                   |
 | =B= | ~merita-bibliography~    | Generate bibliography           |
+| =K= | ~merita-biosketch~       | Generate NIH biosketch scaffold |
+| =T= | ~merita-list-tags~       | List all tags with counts       |
 | =s= | ~merita-stats~           | Career statistics dashboard     |
 | =L= | ~merita-link-entries~    | Link two entries                |
 | =U= | ~merita-unlink-entries~  | Unlink two entries              |
@@ -48,6 +50,7 @@ Accessible via ~merita-browse~ (command map: =l=).
 | =b=   | ~merita-browse-open-url~ | Open DOI/PMID in browser |
 | =O=   | ~merita-browse-open-file~ | Open local file         |
 | =f= / =/= | ~merita-browse-filter~ | Filter entries (layered) |
+| =t=       | ~merita-browse-filter-tag~ | Add a tag filter layer |
 | =F=       | ~merita-browse-filter-clear~ | Clear all filters  |
 | =m=   | ~merita-browse-metrics~ | Show metrics at point   |
 | =g=   | ~merita-browse-refresh~ | Refresh list            |

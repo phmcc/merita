@@ -4,8 +4,8 @@
 
 ;; Author: Paul H. McClelland <paulhmcclelland@protonmail.com>
 ;; Maintainer: Paul H. McClelland <paulhmcclelland@protonmail.com>
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (merita "0.1.0") (tabularium "0.4.4"))
+;; Version: 0.5.1
+;; Package-Requires: ((emacs "29.1") (merita "0.1.0") (tabularium "0.4.5"))
 ;; Keywords: bib, data
 ;; URL: https://codeberg.org/phmcc/merita
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -81,7 +81,7 @@ After calling this, you can open the merita database with
             ;; -- Core bibliographic fields --
             (:name type
                    :type choice :prompt "Type" :required t :width 18
-                   :choices ("journal-article" "review-article" "editorial"
+                   :choice ("journal-article" "review-article" "editorial"
                              "letter" "case-report" "book" "book-chapter"
                              "conference-paper" "preprint" "technical-report"
                              "thesis-doctoral" "thesis-masters"
@@ -159,7 +159,7 @@ After calling this, you can open the merita database with
             ;; -- Merita-specific --
             (:name author_position
                    :type choice :prompt "Author position" :width 8
-                   :choices ("first" "co-first" "second" "third"
+                   :choice ("first" "co-first" "second" "third"
                              "senior" "co-senior" "corresponding" "middle" "sole"))
             (:name author_count
                    :type integer :prompt "Author count" :hidden t)
@@ -171,11 +171,11 @@ After calling this, you can open the merita database with
                    :type integer :prompt "Altmetric score" :hidden t)
             (:name status
                    :type choice :prompt "Status" :width 12
-                   :choices ("published" "in-press" "accepted" "revision"
+                   :choice ("published" "in-press" "accepted" "revision"
                              "review" "submitted" "preparation" "retracted"))
             (:name peer_reviewed
                    :type choice :prompt "Peer reviewed?" :hidden t
-                   :choices ("1" "0"))
+                   :choice ("1" "0"))
 
             ;; -- Content --
             (:name abstract
@@ -190,7 +190,7 @@ After calling this, you can open the merita database with
                    :type text :prompt "Grant number(s)" :hidden t)
             (:name grant_role
                    :type choice :prompt "Grant role" :hidden t
-                   :choices ("PI" "Co-PI" "Co-I" "Mentor" "Trainee" "Other"))
+                   :choice ("PI" "Co-PI" "Co-I" "Mentor" "Trainee" "Other"))
             (:name grant_amount
                    :type number :prompt "Grant amount" :hidden t)
             (:name grant_period
@@ -221,7 +221,7 @@ After calling this, you can open the merita database with
                    :complete historical)
             (:name pkg_registry
                    :type choice :prompt "Package registry" :hidden t
-                   :choices ("" "CRAN" "PyPI" "MELPA" "npm" "Bioconductor"))
+                   :choice ("" "CRAN" "PyPI" "MELPA" "npm" "Bioconductor"))
             (:name pkg_name
                    :type text :prompt "Package name" :hidden t)
             (:name pkg_version
@@ -282,55 +282,180 @@ If the database is empty, offers to run `merita-seed'."
   (and (merita-tabularium--on-merita-p)
        (get-text-property (point) 'merita-link-id)))
 
+(defun merita-tabularium--pre-render-hook ()
+  "Install merita's citation header for merita form buffers.
+Added to `tabularium-entry-pre-render-hook' so the function is in
+place before the layout pass consults it."
+  (when (merita-tabularium--on-merita-p)
+    (setq tabularium-entry-header-function
+          #'merita-tabularium--header-string)))
+
 (defun merita-tabularium--render-hook ()
   "Inject linked entries and hint line into the merita form buffer.
 Added to `tabularium-entry-render-hook'."
-  (when (and (merita-tabularium--on-merita-p)
-             (bound-and-true-p tabularium-entry-editing-id))
-    (let ((id tabularium-entry-editing-id)
-          (w 80))
-      ;; Inject links before the footer
-      (let ((related (merita--get-related id)))
-        (when related
-          (save-excursion
-            (goto-char tabularium-entry-footer-start)
-            (insert "  " (propertize "Linked entries:"
-                                     'face 'font-lock-type-face) "\n")
-            (dolist (rel related)
-              (let* ((rtype (or (alist-get 'relation_type rel) ""))
-                     (etype (or (alist-get 'type rel) ""))
-                     (short (merita--entry-short-title rel))
-                     (rtitle (or (alist-get 'title rel) ""))
-                     (fixed 12)
-                     (avail (- w 2 fixed
-                               (length rtype) (length etype) (length short)))
-                     (title-str (merita--truncate rtitle (max 10 avail)))
-                     (line-start (point)))
-                (insert (format "  {%s} [%s] %s. \"%s\"\n"
-                                rtype etype short title-str))
-                (put-text-property line-start (point)
-                                   'merita-linked-entry-id
-                                   (alist-get 'related_id rel))
-                (put-text-property line-start (point)
-                                   'merita-link-id
-                                   (alist-get 'id rel))
-                (put-text-property line-start (point)
-                                   'tabularium-navigable t)))
-            (insert "\n")
-            (setq tabularium-entry-footer-start (point)))))
-      ;; Append merita hint line after the standard hints
-      (goto-char (point-max))
-      (insert "\n\n  " (propertize "── Merita ──" 'face '(:weight bold)) "\n")
-      (insert "  "
-              (propertize "L" 'face 'help-key-binding) " Link  "
-              (propertize "b" 'face 'help-key-binding) " URL  "
-              (propertize "O" 'face 'help-key-binding) " File  "
-              (propertize "M-RET" 'face 'help-key-binding) " Jump"))))
+  (when (merita-tabularium--on-merita-p)
+    (when (bound-and-true-p tabularium-entry-editing-id)
+      (let ((id tabularium-entry-editing-id)
+            (w 80))
+        ;; Inject links before the footer
+        (let ((related (merita--get-related id)))
+          (when related
+            (save-excursion
+              (goto-char tabularium-entry-footer-start)
+              (insert "  " (propertize "Linked entries:"
+                                       'face 'font-lock-type-face) "\n")
+              (dolist (rel related)
+                (let* ((rtype (or (alist-get 'relation_type rel) ""))
+                       (etype (or (alist-get 'type rel) ""))
+                       (short (merita--entry-short-title rel))
+                       (rtitle (or (alist-get 'title rel) ""))
+                       (fixed 12)
+                       (avail (- w 2 fixed
+                                 (length rtype) (length etype) (length short)))
+                       (title-str (merita--truncate rtitle (max 10 avail)))
+                       (line-start (point)))
+                  (insert (format "  {%s} [%s] %s. \"%s\"\n"
+                                  rtype etype short title-str))
+                  (put-text-property line-start (point)
+                                     'merita-linked-entry-id
+                                     (alist-get 'related_id rel))
+                  (put-text-property line-start (point)
+                                     'merita-link-id
+                                     (alist-get 'id rel))
+                  (put-text-property line-start (point)
+                                     'tabularium-navigable t)))
+              (insert "\n")
+              (setq tabularium-entry-footer-start (point)))))
+        ;; Append merita hint line after the standard hints
+        (goto-char (point-max))
+        (insert "\n\n  " (propertize "── Merita ──" 'face '(:weight bold)) "\n")
+        (insert "  "
+                (propertize "L" 'face 'help-key-binding) " Link  "
+                (propertize "l" 'face 'help-key-binding) " Show link  "
+                (propertize "b" 'face 'help-key-binding) " URL  "
+                (propertize "O" 'face 'help-key-binding) " File  "
+                (propertize "M-RET" 'face 'help-key-binding) " Edit link")))))
+
+(defun merita-tabularium--header-string ()
+  "Return the citation header for the current merita form buffer.
+Used as `tabularium-entry-header-function' to render a wrapped
+citation preview at the top of the form.  Returns nil when the
+entry has no data to render (e.g. a brand-new empty form)."
+  (when (merita-tabularium--on-merita-p)
+    (let* ((entry (cl-loop for (k . v) in tabularium-entry--values
+                           collect (cons k v)))
+           (w 80)
+           (preview-entry (cons (cons 'doi nil)
+                                (assq-delete-all 'doi (copy-alist entry))))
+           (fmt (let ((merita--latex-context nil))
+                  (funcall (merita--resolve-citation-style
+                            merita-default-citation-style)
+                           preview-entry))))
+      (when (and fmt
+                 (not (string-empty-p fmt))
+                 ;; Suppress when the formatted citation contains no actual
+                 ;; content — only punctuation, brackets, and whitespace.
+                 (not (string-empty-p
+                       (replace-regexp-in-string
+                        "[[:punct:][:space:]]+" "" fmt))))
+        (with-temp-buffer
+          (let ((start (point))
+                (fill-prefix "  ")
+                (fill-column (- w 2)))
+            (insert "  " fmt)
+            (fill-region start (point))
+            (put-text-property start (point) 'face 'font-lock-doc-face))
+          (buffer-string))))))
+
+(defun merita-tabularium--new-hook ()
+  "Auto-populate merita-specific fields on new entry creation.
+Sets initial values for Citations, Links, and timestamp fields so
+the user does not have to fill in bookkeeping defaults manually."
+  (when (merita-tabularium--on-merita-p)
+    (let ((today (format-time-string "%Y-%m-%d %H:%M:%S")))
+      (dolist (default '((citations . "0")
+                         (links . "0")
+                         (date_added . NEEDS-TODAY)
+                         (date_modified . NEEDS-TODAY)))
+        (let ((field (car default))
+              (val (cdr default)))
+          ;; Only set if currently empty (don't overwrite user input)
+          (let ((current (alist-get field tabularium-entry--values)))
+            (when (or (null current)
+                      (and (stringp current) (string-empty-p current)))
+              (setf (alist-get field tabularium-entry--values)
+                    (if (eq val 'NEEDS-TODAY) today val)))))))))
+
+(defun merita-tabularium--pre-submit-hook ()
+  "Update merita-specific bookkeeping fields on every save.
+Sets =date_modified= to the current timestamp so the field tracks
+the most recent edit, and recomputes =author_count= from the
+=authors= field."
+  (when (merita-tabularium--on-merita-p)
+    ;; Always refresh date_modified
+    (setf (alist-get 'date_modified tabularium-entry--values)
+          (format-time-string "%Y-%m-%d %H:%M:%S"))
+    ;; Recompute author_count from authors (comma-separated).
+    ;; Empty authors → 0; otherwise count commas + 1.
+    (let* ((authors (alist-get 'authors tabularium-entry--values))
+           (authors-str (if authors (format "%s" authors) ""))
+           (count (if (string-empty-p (string-trim authors-str))
+                      0
+                    (1+ (cl-count ?, authors-str)))))
+      (setf (alist-get 'author_count tabularium-entry--values)
+            (number-to-string count)))))
+
+(defconst merita-tabularium--type-required-fields
+  '(("journal-article"   . (authors year journal))
+    ("review-article"    . (authors year journal))
+    ("editorial"         . (authors year journal))
+    ("letter"            . (authors year journal))
+    ("case-report"       . (authors year journal))
+    ("book"              . (authors year publisher))
+    ("book-chapter"      . (authors year book_title publisher))
+    ("conference-paper"  . (authors year conference))
+    ("preprint"          . (authors year))
+    ("technical-report"  . (authors year))
+    ("thesis-doctoral"   . (authors year))
+    ("thesis-masters"    . (authors year))
+    ("podium"            . (authors year conference))
+    ("poster"            . (authors year conference))
+    ("invited-talk"      . (authors year conference))
+    ("keynote"           . (authors year conference))
+    ("workshop"          . (authors year conference))
+    ("abstract"          . (authors year))
+    ("patent"            . (authors year))
+    ("grant"             . (authors year))
+    ("award"             . (authors year))
+    ("dataset"           . (authors year))
+    ("software"          . (authors year))
+    ("media"             . (authors year))
+    ("other"             . (authors year)))
+  "Per-type required fields for merita entries.
+Each entry maps an entry type (string from the schema's `:choice'
+list) to a list of field names (symbols) that are required when
+that type is selected.  Used by `merita-tabularium--required-p'.
+
+These required-by-convention fields are in addition to the static
+`:required t' fields in the schema (currently `type' and `title'),
+which are required regardless of entry type.")
+
+(defun merita-tabularium--required-p (field-name values)
+  "Return non-nil if FIELD-NAME is required for the current entry type.
+Consults `merita-tabularium--type-required-fields' against the
+=type= field in VALUES.  Used as a member of
+`tabularium-entry-required-field-functions'."
+  (when (merita-tabularium--on-merita-p)
+    (let* ((type (alist-get 'type values))
+           (type-str (when type (format "%s" type)))
+           (required-fields (cdr (assoc type-str
+                                        merita-tabularium--type-required-fields))))
+      (memq field-name required-fields))))
 
 ;;; ** 2.1. Link Commands
 
 (defun merita-tabularium-jump-to-link ()
-  "Jump to the linked merita entry at point."
+  "Show the linked merita entry at point in the merita native view."
   (interactive)
   (let ((linked-id (get-text-property (point) 'merita-linked-entry-id)))
     (if linked-id
@@ -338,6 +463,15 @@ Added to `tabularium-entry-render-hook'."
           (if entry
               (merita--display-entry entry)
             (message "Linked entry not found.")))
+      (message "Not on a linked-entry line."))))
+
+(defun merita-tabularium-edit-link ()
+  "Open the linked merita entry at point in a tabularium form buffer.
+Prompts for unsaved changes if the current form has them."
+  (interactive)
+  (let ((linked-id (get-text-property (point) 'merita-linked-entry-id)))
+    (if linked-id
+        (tabularium-new-entry linked-id)
       (message "Not on a linked-entry line."))))
 
 (defun merita-tabularium-edit-link-at-point ()
@@ -407,12 +541,19 @@ On a merita link line, remove the link.  Otherwise call ORIG-FN."
 
 (defun merita-tabularium--setup-keys ()
   "Add merita keybindings to `tabularium-entry-mode-map'."
-  ;; M-RET: jump to linked entry
-  (define-key tabularium-entry-mode-map (kbd "M-RET")
+  ;; l: show the linked entry in the merita native view
+  (define-key tabularium-entry-mode-map (kbd "l")
     (lambda ()
       (interactive)
       (if (merita-tabularium--on-link-p)
           (merita-tabularium-jump-to-link)
+        (message "Not on a linked-entry line."))))
+  ;; M-RET: open the linked entry in a tabularium form buffer
+  (define-key tabularium-entry-mode-map (kbd "M-RET")
+    (lambda ()
+      (interactive)
+      (if (merita-tabularium--on-link-p)
+          (merita-tabularium-edit-link)
         (message "Not on a linked-entry line."))))
   ;; L: create a new link
   (define-key tabularium-entry-mode-map (kbd "L")
@@ -441,7 +582,16 @@ On a merita link line, remove the link.  Otherwise call ORIG-FN."
             #'merita-tabularium--around-edit-field)
 (advice-add 'tabularium-entry-reset-field :around
             #'merita-tabularium--around-reset-field)
-(add-hook 'tabularium-entry-render-hook #'merita-tabularium--render-hook)
+(add-hook 'tabularium-entry-pre-render-hook
+          #'merita-tabularium--pre-render-hook)
+(add-hook 'tabularium-entry-render-hook
+          #'merita-tabularium--render-hook)
+(add-hook 'tabularium-entry-new-hook
+          #'merita-tabularium--new-hook)
+(add-hook 'tabularium-entry-pre-submit-hook
+          #'merita-tabularium--pre-submit-hook)
+(add-hook 'tabularium-entry-required-field-functions
+          #'merita-tabularium--required-p)
 (merita-tabularium--setup-keys)
 
 (provide 'merita-tabularium)

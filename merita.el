@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Copyright (C) 2026 Paul H. McClelland
 
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: bib, data, convenience
 ;; URL: https://codeberg.org/phmcc/merita
@@ -165,6 +165,8 @@ values are shown."
     (define-key map (kbd "r") #'merita-export-ris)
     (define-key map (kbd "c") #'merita-export-csv)
     (define-key map (kbd "B") #'merita-bibliography)
+    (define-key map (kbd "K") #'merita-biosketch)
+    (define-key map (kbd "T") #'merita-list-tags)
     (define-key map (kbd "o") #'merita-import-orcid)
     (define-key map (kbd "s") #'merita-stats)
     (define-key map (kbd "L") #'merita-link-entries)
@@ -1676,8 +1678,10 @@ Each element is (COLUMN . WIDTH).  Any database field is valid."
 
 (defvar-local merita-browse--filter-layers nil
   "List of active filter layers for browse mode.
-Each layer is a plist with :value (search term), :join (nil, and,
-or, and-not, or-not), matching tabularium's filter conventions.")
+Each layer is a plist with :kind (`text' or `tag'), :value (search
+term or tag string), :join (nil, and, or, and-not, or-not),
+matching tabularium's filter conventions.  Layers without :kind
+are treated as text filters for backward compatibility.")
 
 (defconst merita-browse--search-fields
   '("title" "authors" "journal" "keywords")
@@ -1688,16 +1692,23 @@ or, and-not, or-not), matching tabularium's filter conventions.")
   "Alist mapping join types to display symbols.")
 
 (defun merita-browse--filter-layer-sql (layer)
-  "Return a SQL condition for a single filter LAYER."
-  (let ((conditions (mapcar (lambda (f)
-                              (format "%s LIKE ? COLLATE NOCASE" f))
-                            merita-browse--search-fields)))
-    (format "(%s)" (string-join conditions " OR "))))
+  "Return a SQL condition for a single filter LAYER.
+Tag layers use boundary-safe matching against the tags column;
+text layers (the default) match across title, authors, journal,
+and keywords."
+  (pcase (or (plist-get layer :kind) 'text)
+    ('tag (merita--tag-match-clause))
+    (_    (let ((conditions (mapcar (lambda (f)
+                                      (format "%s LIKE ? COLLATE NOCASE" f))
+                                    merita-browse--search-fields)))
+            (format "(%s)" (string-join conditions " OR "))))))
 
 (defun merita-browse--filter-layer-params (layer)
   "Return SQL parameters for a single filter LAYER."
-  (let ((pat (format "%%%s%%" (plist-get layer :value))))
-    (make-list (length merita-browse--search-fields) pat)))
+  (pcase (or (plist-get layer :kind) 'text)
+    ('tag (list (merita--tag-match-param (plist-get layer :value))))
+    (_    (let ((pat (format "%%%s%%" (plist-get layer :value))))
+            (make-list (length merita-browse--search-fields) pat)))))
 
 (defun merita-browse--build-filter-clause ()
   "Build a SQL WHERE clause and params from filter layers.
@@ -1727,8 +1738,13 @@ Returns (WHERE-STRING . PARAMS-LIST), or nil if no filters."
       (dolist (layer merita-browse--filter-layers)
         (let ((join-sym (alist-get (plist-get layer :join)
                                    merita-browse--join-symbols))
-              (val (plist-get layer :value)))
-          (push (format "%s(%s)" join-sym val) parts)))
+              (val (plist-get layer :value))
+              (kind (or (plist-get layer :kind) 'text)))
+          (push (format "%s%s%s"
+                        join-sym
+                        (if (eq kind 'tag) "#" "")
+                        val)
+                parts)))
       (string-join (nreverse parts)))))
 
 (defun merita-browse--filter-prompt-join ()
@@ -1752,7 +1768,7 @@ When FILTER is non-nil, apply it as the initial text filter."
       (merita-browse-mode)
       (when filter
         (setq merita-browse--filter-layers
-              (list (list :value filter :join nil))))
+              (list (list :kind 'text :value filter :join nil))))
       (merita-browse--refresh))
     (switch-to-buffer buf)))
 
@@ -1768,6 +1784,7 @@ When FILTER is non-nil, apply it as the initial text filter."
     (define-key map (kbd "O") #'merita-browse-open-file)
     (define-key map (kbd "f") #'merita-browse-filter)
     (define-key map (kbd "/") #'merita-browse-filter)
+    (define-key map (kbd "t") #'merita-browse-filter-tag)
     (define-key map (kbd "F") #'merita-browse-filter-clear)
     (define-key map (kbd "m") #'merita-browse-metrics)
     (define-key map (kbd "i") #'merita-browse-import)
@@ -1966,23 +1983,38 @@ Supported formats: BibTeX, CSV, TSV, ORCID."
       ("orcid"  (call-interactively #'merita-import-orcid)))
     (merita-browse--refresh)))
 
-(defun merita-browse-filter ()
-  "Add a text filter layer to the browse view.
-Searches case-insensitively across title, authors, journal, and
-keywords.  When filters already exist, prompts for join logic
-(AND, OR, AND NOT, OR NOT)."
-  (interactive)
-  (let ((term (read-string
-               (if merita-browse--filter-layers
-                   (format "Filter [%s] + term: "
-                           (merita-browse--filter-description))
-                 "Filter: "))))
+(defun merita-browse-filter (&optional kind)
+  "Add a filter layer to the browse view.
+With no prefix argument, prompts for a free-text search term that
+matches across title, authors, journal, and keywords.  With a
+prefix argument, KIND is `tag' and the prompt accepts a single tag
+to match against the tags column.  When filters already exist,
+also prompts for join logic (AND, OR, AND NOT, OR NOT)."
+  (interactive (list (if current-prefix-arg 'tag 'text)))
+  (let* ((kind (or kind 'text))
+         (term (read-string
+                (format "%s%s: "
+                        (if (eq kind 'tag) "Tag filter" "Filter")
+                        (if merita-browse--filter-layers
+                            (format " [%s] +"
+                                    (merita-browse--filter-description))
+                          "")))))
     (unless (string-empty-p (string-trim term))
-      (let ((join (merita-browse--filter-prompt-join)))
+      (let ((join (merita-browse--filter-prompt-join))
+            (value (if (eq kind 'tag)
+                       (downcase (string-trim term))
+                     (string-trim term))))
         (setq merita-browse--filter-layers
               (append merita-browse--filter-layers
-                      (list (list :value (string-trim term) :join join))))
+                      (list (list :kind kind :value value :join join))))
         (merita-browse--refresh)))))
+
+;;;###autoload
+(defun merita-browse-filter-tag ()
+  "Add a tag filter layer to the browse view.
+Equivalent to invoking `merita-browse-filter' with a prefix argument."
+  (interactive)
+  (merita-browse-filter 'tag))
 
 (defun merita-browse-filter-clear ()
   "Clear all filter layers from the browse view."
@@ -3352,6 +3384,30 @@ Uses unified helpers; works in both LaTeX and plain text contexts."
     (when date (push (format "%s." date) parts))
     (string-join (nreverse parts) " ")))
 
+(defun merita--format-award-line (entry)
+  "Format an award line from ENTRY for honors lists.
+Produces \"YYYY  Title, Body — Notes\" suitable for NIH biosketch
+Section B or any chronological honors list.  Works in both LaTeX
+and plain text contexts via the unified escape helpers."
+  (let* ((year (alist-get 'year entry))
+         (title (alist-get 'title entry))
+         (body (alist-get 'award_body entry))
+         (notes (alist-get 'notes entry))
+         (parts '()))
+    (when year (push (format "%s" year) parts))
+    (when title
+      (push (if body
+                (format "%s, %s"
+                        (merita--escape title)
+                        (merita--escape body))
+              (merita--escape title))
+            parts))
+    (when (and notes (not (string-empty-p notes)))
+      (push (format "%s %s" (if merita--latex-context "---" "—")
+                    (merita--escape notes))
+            parts))
+    (string-join (nreverse parts) "  ")))
+
 ;;; *** 7.1.4. LaTeX File Generation
 
 ;;;###autoload
@@ -3388,9 +3444,12 @@ Uses unified helpers; works in both LaTeX and plain text contexts."
             (let ((sorted (if merita-latex-reverse-numbering (reverse entries) entries)))
               (dolist (entry sorted)
                 (insert (format "  \\item %s\n\n"
-                                (if (memq type '(podium poster invited-talk keynote workshop))
-                                    (merita--format-presentation-line entry)
-                                  (funcall merita-latex-formatter entry))))))
+                                (cond
+                                 ((eq type 'award)
+                                  (merita--format-award-line entry))
+                                 ((memq type '(podium poster invited-talk keynote workshop))
+                                  (merita--format-presentation-line entry))
+                                 (t (funcall merita-latex-formatter entry)))))))
             (insert (if merita-latex-enumerate-style
                         "\\end{enumerate}\n\n" "\\end{itemize}\n\n"))))))
     (message "Exported %d entries to %s" (length all-entries) filename)))
@@ -4068,57 +4127,26 @@ Returns the month as an integer (1-12), or nil if the user enters <ALL>."
       (string-to-number val))))
 
 (defun merita--query-bibliography (start-year start-month end-year end-month
-                                    &optional types strings)
+                                    &optional types strings tags-and tags-any
+                                              tags-not tags-nor)
   "Query entries matching the given filters.
-START-YEAR, START-MONTH, END-YEAR, END-MONTH may each be nil
-to leave that boundary unconstrained.  TYPES is an optional list
-of type symbols.  STRINGS is an optional list of search terms;
-entries must match all terms (case-insensitive) across title,
-authors, journal, or keywords.  Returns entries in chronological
-order."
-  (merita--ensure-db)
-  (let ((conditions (list merita--active-status-sql))
-        (params '()))
-    ;; Start boundary
-    (when start-year
-      (if start-month
-          (progn
-            (setq conditions
-                  (append conditions
-                          (list "(year > ? OR (year = ? AND (month >= ? OR month IS NULL)))")))
-            (setq params (append params (list start-year start-year start-month))))
-        (setq conditions (append conditions (list "year >= ?")))
-        (setq params (append params (list start-year)))))
-    ;; End boundary
-    (when end-year
-      (if end-month
-          (progn
-            (setq conditions
-                  (append conditions
-                          (list "(year < ? OR (year = ? AND (month <= ? OR month IS NULL)))")))
-            (setq params (append params (list end-year end-year end-month))))
-        (setq conditions (append conditions (list "year <= ?")))
-        (setq params (append params (list end-year)))))
-    ;; Type filter
-    (when types
-      (let ((placeholders (mapconcat (lambda (_) "?") types ", ")))
-        (setq conditions
-              (append conditions (list (format "type IN (%s)" placeholders))))
-        (setq params (append params (mapcar #'symbol-name types)))))
-    ;; String filter (case-insensitive, AND across terms, OR across fields)
-    (dolist (term strings)
-      (setq conditions
-            (append conditions
-                    (list (concat "(title LIKE ? COLLATE NOCASE"
-                                  " OR authors LIKE ? COLLATE NOCASE"
-                                  " OR journal LIKE ? COLLATE NOCASE"
-                                  " OR keywords LIKE ? COLLATE NOCASE)"))))
-      (let ((pat (format "%%%s%%" term)))
-        (setq params (append params (list pat pat pat pat)))))
-    (merita--query
-     (format "SELECT * FROM data WHERE %s ORDER BY year ASC, month ASC, title ASC"
-             (mapconcat #'identity conditions " AND "))
-     params)))
+START-YEAR, START-MONTH, END-YEAR, END-MONTH may each be nil to leave that
+boundary unconstrained.  TYPES is an optional list of type symbols.
+STRINGS is an optional list of search terms; entries must match all terms
+(case-insensitive) across title, authors, journal, or keywords.
+TAGS-AND, TAGS-ANY, TAGS-NOT, TAGS-NOR are tag filters with AND/OR/NAND/NOR
+semantics respectively.  Returns entries in chronological order."
+  (merita--query-filter-spec
+   (list :start-year  start-year
+         :start-month start-month
+         :end-year    end-year
+         :end-month   end-month
+         :types       types
+         :strings     strings
+         :tags        tags-and
+         :tags-any    tags-any
+         :tags-not    tags-not
+         :tags-nor    tags-nor)))
 
 (defun merita--format-bibliography (entries heading style formatter latex-p)
   "Format ENTRIES as a bibliography, display in a buffer, and copy to kill ring.
@@ -4126,56 +4154,59 @@ HEADING is the title line.  FORMATTER is the citation function.
 LATEX-P selects LaTeX or plain text output."
   (let ((merita--latex-context latex-p)
         (presentation-types '(podium poster invited-talk keynote workshop)))
-    (if (null entries)
-        (progn (message "No entries found.") nil)
-      (let* ((buf (get-buffer-create "*merita-bibliography*"))
-             (text
-              (if latex-p
-                  (concat
-                   (format "%% %s (%d entries)\n" heading (length entries))
-                   (format "%% Style: %s\n" style)
-                   (format "%% Generated: %s\n\n"
-                           (format-time-string "%Y-%m-%d %H:%M"))
-                   "\\begin{enumerate}\n"
-                   (mapconcat
-                    (lambda (entry)
-                      (let ((etype (intern (or (alist-get 'type entry) "other"))))
-                        (format "  \\item %s\n"
-                                (if (memq etype presentation-types)
-                                    (merita--format-presentation-line entry)
-                                  (funcall formatter entry)))))
-                    entries "\n")
-                   "\\end{enumerate}\n")
-                (let ((i 0))
-                  (concat
-                   (format "%s (%d entries)\n" heading (length entries))
-                   (format "Style: %s\n\n" style)
-                   (mapconcat
-                    (lambda (entry)
-                      (setq i (1+ i))
-                      (format "%d. %s" i (funcall formatter entry)))
-                    entries "\n\n")
-                   "\n")))))
-        (with-current-buffer buf
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert text)
-            (goto-char (point-min))
-            (special-mode)
-            (visual-line-mode 1)))
-        (kill-new text)
-        (pop-to-buffer buf)
-        (message "%d entries. Copied to kill ring." (length entries))
-        text))))
+    (cl-flet ((render (entry)
+                (let ((etype (intern (or (alist-get 'type entry) "other"))))
+                  (cond
+                   ((eq etype 'award)
+                    (merita--format-award-line entry))
+                   ((memq etype presentation-types)
+                    (merita--format-presentation-line entry))
+                   (t (funcall formatter entry))))))
+      (if (null entries)
+          (progn (message "No entries found.") nil)
+        (let* ((buf (get-buffer-create "*merita-bibliography*"))
+               (text
+                (if latex-p
+                    (concat
+                     (format "%% %s (%d entries)\n" heading (length entries))
+                     (format "%% Style: %s\n" style)
+                     (format "%% Generated: %s\n\n"
+                             (format-time-string "%Y-%m-%d %H:%M"))
+                     "\\begin{enumerate}\n"
+                     (mapconcat
+                      (lambda (entry) (format "  \\item %s\n" (render entry)))
+                      entries "\n")
+                     "\\end{enumerate}\n")
+                  (let ((i 0))
+                    (concat
+                     (format "%s (%d entries)\n" heading (length entries))
+                     (format "Style: %s\n\n" style)
+                     (mapconcat
+                      (lambda (entry)
+                        (setq i (1+ i))
+                        (format "%d. %s" i (render entry)))
+                      entries "\n\n")
+                     "\n")))))
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert text)
+              (goto-char (point-min))
+              (special-mode)
+              (visual-line-mode 1)))
+          (kill-new text)
+          (pop-to-buffer buf)
+          (message "%d entries. Copied to kill ring." (length entries))
+          text)))))
 
 ;;;###autoload
 (defun merita-bibliography ()
-  "Generate a bibliography with type, date-range, and text filters.
-Prompts for type, start/end year and month, search terms, output
-format, and citation style.  Use <ALL> to leave any filter
-unconstrained; leave the search terms blank to skip text
-filtering.  Result displayed in *merita-bibliography* and copied
-to kill ring."
+  "Generate a bibliography with type, date-range, text, and tag filters.
+Prompts for type, start/end year and month, search terms, tag filters
+(AND, OR, NAND, NOR), output format, and citation style.  Use <ALL> to
+leave any filter unconstrained; leave the search-term and tag prompts
+blank to skip filtering.  Result displayed in *merita-bibliography* and
+copied to kill ring."
   (interactive)
   (let* ((types (merita--read-type-filter))
          (cur-year (nth 5 (decode-time)))
@@ -4190,6 +4221,17 @@ to kill ring."
                                       (let ((trimmed (string-trim s)))
                                         (unless (string-empty-p trimmed) trimmed)))
                                     raw-strings)))
+         ;; Tag filters
+         (tag-mode (merita--read-tag-mode))
+         (tags (when tag-mode
+                 (merita--normalize-tag-list
+                  (read-string
+                   (format "Tags (%s, comma-separated): "
+                           (upcase (symbol-name tag-mode)))))))
+         (tags-and (when (eq tag-mode 'and) tags))
+         (tags-any (when (eq tag-mode 'or)  tags))
+         (tags-not (when (eq tag-mode 'not) tags))
+         (tags-nor (when (eq tag-mode 'nor) tags))
          ;; Style prompts
          (format-choices '("plain text" "latex"))
          (fmt (completing-read "Output format: " format-choices nil t nil nil "plain text"))
@@ -4201,7 +4243,8 @@ to kill ring."
          (formatter (cdr (assoc style merita--style-formatter-map)))
          (latex-p (equal fmt "latex"))
          ;; Query
-         (entries (merita--query-bibliography sy sm ey em types strings))
+         (entries (merita--query-bibliography sy sm ey em types strings
+                                              tags-and tags-any tags-not tags-nor))
          ;; Build heading
          (type-part (if types
                         (mapconcat #'symbol-name types ", ")
@@ -4220,8 +4263,26 @@ to kill ring."
          (filter-part (if strings
                           (format ", matching \"%s\"" (string-join strings "\", \""))
                         ""))
-         (heading (format "Bibliography: %s%s%s" type-part date-part filter-part)))
+         (tag-part (if tags
+                       (format ", tags %s {%s}"
+                               (upcase (symbol-name tag-mode))
+                               (string-join tags ", "))
+                     ""))
+         (heading (format "Bibliography: %s%s%s%s"
+                          type-part date-part filter-part tag-part)))
     (merita--format-bibliography entries heading style formatter latex-p)))
+
+(defun merita--read-tag-mode ()
+  "Prompt for a tag filter mode, or nil to skip tag filtering."
+  (let ((choice (completing-read "Tag filter: "
+                                 '("<NONE>" "AND" "OR" "NOT (NAND)" "NOR")
+                                 nil t nil nil "<NONE>")))
+    (pcase choice
+      ("<NONE>"     nil)
+      ("AND"        'and)
+      ("OR"         'or)
+      ("NOT (NAND)" 'not)
+      ("NOR"        'nor))))
 
 ;;; * 8. Utility
 
@@ -4274,6 +4335,240 @@ to kill ring."
   "Count peer-reviewed entries."
   (merita--count "peer_reviewed = 1"))
 
+;;; ** 8.2. Tag Filtering
+
+;; Tags are stored as a comma-separated string in the `tags' column.
+;; Matching uses boundary-safe LIKE: the column is wrapped in commas and
+;; whitespace is stripped before comparison, so `cdh1' will not match
+;; `cdh1-related'.  Tag names should not contain whitespace; use
+;; hyphens (e.g., `peritoneal-malignancy', `til-immunotherapy').
+
+(defun merita--normalize-tag-list (input)
+  "Parse INPUT into a list of normalized (lowercased, trimmed) tag strings.
+INPUT may be a string (comma-separated), a symbol, or a list of either.
+Returns nil for empty or nil input."
+  (cond
+   ((null input) nil)
+   ((listp input)
+    (delete-dups
+     (delq nil
+           (mapcan #'merita--normalize-tag-list input))))
+   ((symbolp input)
+    (merita--normalize-tag-list (symbol-name input)))
+   ((stringp input)
+    (delete-dups
+     (delq nil
+           (mapcar (lambda (s)
+                     (let ((trimmed (downcase (string-trim s))))
+                       (unless (string-empty-p trimmed) trimmed)))
+                   (split-string input "[, ]" t)))))
+   (t nil)))
+
+(defun merita--tag-match-clause ()
+  "Return a SQL fragment that matches a single tag against the tags column.
+The fragment expects one positional parameter (the LIKE pattern from
+`merita--tag-match-param').  Whitespace in the stored tags is stripped
+before comparison so users can write `cdh1, peritoneal' or `cdh1,peritoneal'."
+  (concat "(',' || LOWER(REPLACE(IFNULL(tags, ''), ' ', '')) || ',') "
+          "LIKE ?"))
+
+(defun merita--tag-match-param (tag)
+  "Return the LIKE pattern used by `merita--tag-match-clause' for TAG."
+  (format "%%,%s,%%" (downcase (string-trim tag))))
+
+(defun merita--tag-conditions (tags mode)
+  "Build a SQL filter for TAGS combined according to MODE.
+MODE is one of `and', `or', `not', or `nor':
+  `and' — entry must have all of TAGS
+  `or'  — entry must have at least one of TAGS
+  `not' — entry must be missing at least one of TAGS (NAND)
+  `nor' — entry must have none of TAGS
+
+Returns a cons (FRAGMENT . PARAMS), or nil if TAGS is empty."
+  (when tags
+    (let* ((clause (merita--tag-match-clause))
+           (frags (mapcar (lambda (_) clause) tags))
+           (params (mapcar #'merita--tag-match-param tags)))
+      (pcase mode
+        ('and  (cons (concat "(" (string-join frags " AND ") ")") params))
+        ('or   (cons (concat "(" (string-join frags " OR ")  ")") params))
+        ('not  (cons (concat "NOT (" (string-join frags " AND ") ")") params))
+        ('nor  (cons (concat "NOT (" (string-join frags " OR ")  ")") params))
+        (_     (error "Unknown tag mode: %s" mode))))))
+
+(defun merita--collect-all-tags ()
+  "Return an alist (TAG . COUNT) of all tags in the database, sorted by count desc."
+  (merita--ensure-db)
+  (let ((freq (make-hash-table :test 'equal))
+        (rows (merita--query
+               (format "SELECT tags FROM data WHERE %s AND tags IS NOT NULL AND tags != ''"
+                       merita--active-status-sql))))
+    (dolist (row rows)
+      (dolist (tag (merita--normalize-tag-list (alist-get 'tags row)))
+        (puthash tag (1+ (gethash tag freq 0)) freq)))
+    (let (alist)
+      (maphash (lambda (k v) (push (cons k v) alist)) freq)
+      (sort alist (lambda (a b)
+                    (or (> (cdr a) (cdr b))
+                        (and (= (cdr a) (cdr b))
+                             (string< (car a) (car b)))))))))
+
+;;;###autoload
+(defun merita-list-tags ()
+  "Display all tags in the database with frequency counts.
+Tags are aggregated from the `tags' column across all active entries.
+Selecting a tag opens `merita-browse' with a tag filter applied."
+  (interactive)
+  (merita--ensure-db)
+  (let ((alist (merita--collect-all-tags)))
+    (if (null alist)
+        (message "No tags found.  Use the `tags' field on entries to add some.")
+      (let* ((max-tag (apply #'max (mapcar (lambda (c) (length (car c))) alist)))
+             (choices (mapcar (lambda (c)
+                                (format "%-*s  (%d)"
+                                        (max max-tag 12) (car c) (cdr c)))
+                              alist))
+             (choice (completing-read
+                      (format "Tags (%d) — select to browse: " (length alist))
+                      choices nil t)))
+        (when (and choice (string-match "^\\([^ ]+\\)" choice))
+          (merita-browse)
+          (with-current-buffer "*merita-browse*"
+            (setq merita-browse--filter-layers
+                  (list (list :kind 'tag
+                              :value (match-string 1 choice)
+                              :join nil)))
+            (merita-browse--refresh)))))))
+
+;;; ** 8.3. Filter Spec and Ranking
+
+;; A "filter spec" is a plist consumed by `merita--filter-spec-where' and
+;; `merita--filter-spec-order' to build a parameterized SQL query.  It is
+;; used by both the bibliography command and the org dynamic block.
+;;
+;; Recognized keys:
+;;   :types           list of type symbols (entry types to include)
+;;   :start-year      integer year (inclusive lower bound)
+;;   :start-month     integer month (1-12), only meaningful with :start-year
+;;   :end-year        integer year (inclusive upper bound)
+;;   :end-month       integer month (1-12), only meaningful with :end-year
+;;   :strings         list of free-text terms (AND across terms,
+;;                    OR across title/authors/journal/keywords)
+;;   :tags            list of tags (entry must have all)
+;;   :tags-any        list of tags (entry must have at least one)
+;;   :tags-not        list of tags (entry must be missing at least one)
+;;   :tags-nor        list of tags (entry must have none)
+;;   :peer-reviewed   t to require peer_reviewed = 1
+;;   :author-position list of author position symbols (entry must match one)
+;;   :rank            ordering: `year' (default), `citations', or `biosketch'
+;;   :limit           integer maximum number of returned rows
+
+(defconst merita--rank-orderings
+  '((year      . "year DESC, month DESC, title ASC")
+    (citations . "citations DESC, year DESC, title ASC")
+    (biosketch . "CASE \
+WHEN peer_reviewed = 1 \
+ AND author_position IN ('first','co-first','senior','co-senior','sole','corresponding') \
+THEN 1 \
+WHEN peer_reviewed = 1 THEN 2 \
+ELSE 3 END ASC, \
+year DESC, citations DESC, title ASC"))
+  "Mapping from `:rank' values to SQL ORDER BY fragments.
+The `biosketch' tier prefers peer-reviewed first/senior-author work,
+then peer-reviewed middle authorship, then everything else.")
+
+(defun merita--filter-spec-where (spec)
+  "Build a (CONDITIONS . PARAMS) pair from filter SPEC.
+CONDITIONS is a list of SQL fragments to be joined with AND."
+  (let ((conditions (list merita--active-status-sql))
+        (params '()))
+    ;; Type filter
+    (when-let ((types (plist-get spec :types)))
+      (let ((placeholders (mapconcat (lambda (_) "?") types ", ")))
+        (setq conditions
+              (append conditions (list (format "type IN (%s)" placeholders))))
+        (setq params (append params (mapcar #'symbol-name types)))))
+    ;; Date boundaries
+    (let ((sy (plist-get spec :start-year))
+          (sm (plist-get spec :start-month))
+          (ey (plist-get spec :end-year))
+          (em (plist-get spec :end-month)))
+      (when sy
+        (if sm
+            (progn
+              (setq conditions
+                    (append conditions
+                            (list "(year > ? OR (year = ? AND (month >= ? OR month IS NULL)))")))
+              (setq params (append params (list sy sy sm))))
+          (setq conditions (append conditions (list "year >= ?")))
+          (setq params (append params (list sy)))))
+      (when ey
+        (if em
+            (progn
+              (setq conditions
+                    (append conditions
+                            (list "(year < ? OR (year = ? AND (month <= ? OR month IS NULL)))")))
+              (setq params (append params (list ey ey em))))
+          (setq conditions (append conditions (list "year <= ?")))
+          (setq params (append params (list ey))))))
+    ;; Free-text strings
+    (dolist (term (plist-get spec :strings))
+      (setq conditions
+            (append conditions
+                    (list (concat "(title LIKE ? COLLATE NOCASE"
+                                  " OR authors LIKE ? COLLATE NOCASE"
+                                  " OR journal LIKE ? COLLATE NOCASE"
+                                  " OR keywords LIKE ? COLLATE NOCASE)"))))
+      (let ((pat (format "%%%s%%" term)))
+        (setq params (append params (list pat pat pat pat)))))
+    ;; Tag filters (all four modes compose with AND)
+    (dolist (cell `((,(plist-get spec :tags)     . and)
+                    (,(plist-get spec :tags-any) . or)
+                    (,(plist-get spec :tags-not) . not)
+                    (,(plist-get spec :tags-nor) . nor)))
+      (when-let ((built (merita--tag-conditions (car cell) (cdr cell))))
+        (setq conditions (append conditions (list (car built))))
+        (setq params (append params (cdr built)))))
+    ;; Peer-reviewed flag
+    (when (plist-get spec :peer-reviewed)
+      (setq conditions (append conditions (list "peer_reviewed = 1"))))
+    ;; Author position
+    (when-let ((positions (plist-get spec :author-position)))
+      (let ((placeholders (mapconcat (lambda (_) "?") positions ", ")))
+        (setq conditions
+              (append conditions
+                      (list (format "author_position IN (%s)" placeholders))))
+        (setq params (append params (mapcar #'symbol-name positions)))))
+    (cons conditions params)))
+
+(defun merita--filter-spec-order (spec)
+  "Return the ORDER BY fragment for SPEC.
+Defaults to chronological ascending if `:rank' is not specified, since
+that's the natural CV order; the bibliography command overrides this."
+  (let ((rank (plist-get spec :rank)))
+    (cond
+     ((null rank) "year ASC, month ASC, title ASC")
+     ((symbolp rank)
+      (or (alist-get rank merita--rank-orderings)
+          (error "Unknown :rank value: %s" rank)))
+     ((stringp rank)
+      (or (alist-get (intern rank) merita--rank-orderings)
+          (error "Unknown :rank value: %s" rank))))))
+
+(defun merita--query-filter-spec (spec)
+  "Run a query built from filter SPEC and return matching entries."
+  (merita--ensure-db)
+  (let* ((built (merita--filter-spec-where spec))
+         (conditions (car built))
+         (params (cdr built))
+         (order (merita--filter-spec-order spec))
+         (limit (plist-get spec :limit))
+         (sql (format "SELECT * FROM data WHERE %s ORDER BY %s%s"
+                      (string-join conditions " AND ")
+                      order
+                      (if limit (format " LIMIT %d" limit) ""))))
+    (merita--query sql params)))
+
 ;;; * 9. Org-Mode Integration
 
 ;;; ** 9.1. Dynamic Blocks
@@ -4314,24 +4609,52 @@ symbols.  If neither is given, returns nil (meaning all types)."
         (mapcar #'intern (split-string tstr ","))))
      (t nil))))
 
-(defun merita--org-dblock-entries (types)
-  "Query entries matching TYPES (list of symbols), or all if nil.
-Returns entries in chronological order."
-  (let* ((all (merita--query
-               (format "SELECT * FROM data WHERE %s
-                ORDER BY year ASC, month ASC, title ASC"
-                       merita--active-status-sql))))
-    (if types
-        (cl-remove-if-not
-         (lambda (e)
-           (memq (intern (or (alist-get 'type e) "other")) types))
-         all)
-      all)))
+(defun merita--org-symbol-list (raw)
+  "Coerce RAW (string, symbol, or list) to a list of interned symbols.
+Splits on commas.  Returns nil for nil or empty input."
+  (cond
+   ((null raw) nil)
+   ((listp raw) (mapcar (lambda (x)
+                          (if (symbolp x) x
+                            (intern (string-trim (format "%s" x)))))
+                        raw))
+   (t (let ((s (if (symbolp raw) (symbol-name raw) (format "%s" raw))))
+        (mapcar #'intern (split-string s "," t " *"))))))
+
+(defun merita--org-int (raw)
+  "Coerce RAW to an integer, or nil if not coercible.
+Org dynamic block parameter values arrive as integers, strings, or symbols
+depending on how they were written."
+  (cond
+   ((integerp raw) raw)
+   ((stringp raw) (string-to-number raw))
+   ((symbolp raw) (string-to-number (symbol-name raw)))
+   (t nil)))
+
+(defun merita--params-to-filter-spec (params)
+  "Convert org dynamic block PARAMS into a filter spec plist.
+See `merita--filter-spec-where' for recognized keys."
+  (list :types           (merita--resolve-types params)
+        :start-year      (merita--org-int (plist-get params :since))
+        :end-year        (merita--org-int (plist-get params :until))
+        :tags            (merita--normalize-tag-list (plist-get params :tags))
+        :tags-any        (merita--normalize-tag-list (plist-get params :tags-any))
+        :tags-not        (merita--normalize-tag-list (plist-get params :tags-not))
+        :tags-nor        (merita--normalize-tag-list (plist-get params :tags-nor))
+        :peer-reviewed   (and (plist-member params :peer-reviewed)
+                              (not (memq (plist-get params :peer-reviewed)
+                                         '(nil "nil" "no"))))
+        :author-position (merita--org-symbol-list (plist-get params :author-position))
+        :rank            (let ((r (plist-get params :rank)))
+                           (cond ((null r) nil)
+                                 ((symbolp r) r)
+                                 (t (intern (format "%s" r)))))
+        :limit           (merita--org-int (plist-get params :limit))))
 
 (defun merita--org-format-entries-latex (entries &optional formatter)
   "Format ENTRIES as a LaTeX enumerate block for org export.
 Wraps output in #+begin_export latex / #+end_export.
-Always numbers from 1 in chronological order.
+Always numbers from 1 in the order ENTRIES are given.
 FORMATTER overrides `merita-latex-formatter' if given."
   (let ((presentation-types '(podium poster invited-talk keynote workshop))
         (fmt (or formatter merita-latex-formatter))
@@ -4343,9 +4666,12 @@ FORMATTER overrides `merita-latex-formatter' if given."
       (lambda (entry)
         (let ((etype (intern (or (alist-get 'type entry) "other"))))
           (format "  \\item %s\n"
-                  (if (memq etype presentation-types)
-                      (merita--format-presentation-line entry)
-                    (funcall fmt entry)))))
+                  (cond
+                   ((eq etype 'award)
+                    (merita--format-award-line entry))
+                   ((memq etype presentation-types)
+                    (merita--format-presentation-line entry))
+                   (t (funcall fmt entry))))))
       entries
       "\n")
      "\\end{enumerate}\n"
@@ -4354,12 +4680,20 @@ FORMATTER overrides `merita-latex-formatter' if given."
 (defun merita--org-format-entries-plain (entries &optional formatter)
   "Format ENTRIES as plain text for org.
 FORMATTER is a citation formatter function (default: AMA)."
-  (let ((fmt (or formatter merita-latex-formatter))
+  (let ((presentation-types '(podium poster invited-talk keynote workshop))
+        (fmt (or formatter merita-latex-formatter))
         (i 0))
     (mapconcat
      (lambda (entry)
        (setq i (1+ i))
-       (format "%d. %s" i (funcall fmt entry)))
+       (let ((etype (intern (or (alist-get 'type entry) "other"))))
+         (format "%d. %s" i
+                 (cond
+                  ((eq etype 'award)
+                   (merita--format-award-line entry))
+                  ((memq etype presentation-types)
+                   (merita--format-presentation-line entry))
+                  (t (funcall fmt entry))))))
      entries
      "\n\n")))
 
@@ -4375,11 +4709,31 @@ FORMATTER is a citation formatter function (default: AMA)."
 ;;;###autoload
 (defun org-dblock-write:merita (params)
   "Write a Merita dynamic block.
-PARAMS: :section ALIAS, :types TYPES (comma-separated),
-:format (latex|plain), :style (vancouver|apa|ieee|chicago|nlm|plain).
-If neither :section nor :types is given, all entries are included."
+
+Recognized PARAMS:
+  :section ALIAS         alias from `merita-org-type-aliases'
+  :types T1,T2,...       comma-separated entry type names
+  :tags T1,T2,...        require all tags (AND)
+  :tags-any T1,T2,...    require any tag (OR)
+  :tags-not T1,T2,...    exclude entries having all tags (NAND)
+  :tags-nor T1,T2,...    exclude entries having any tag (NOR)
+  :since YEAR            include entries from YEAR forward
+  :until YEAR            include entries through YEAR
+  :peer-reviewed t       require peer_reviewed = 1
+  :author-position P1,P2 require author_position to match one of P1, P2, ...
+  :rank year             default; reverse-chronological for biosketches
+  :rank citations        order by citations descending
+  :rank biosketch        composite (peer-reviewed first/senior, then year)
+  :limit N               truncate to N entries
+  :format latex|plain    output format (default latex)
+  :style STYLE           citation style (vancouver|apa|ieee|chicago|nlm|plain)
+
+If no filters are given, all active entries are included in chronological
+ascending order."
   (merita--ensure-db)
-  (let* ((types (merita--resolve-types params))
+  (let* ((spec (merita--params-to-filter-spec params))
+         ;; If no rank specified, leave default (chronological ASC) for CV-style
+         ;; output. The :rank parameter overrides per dblock.
          (fmt-raw (or (plist-get params :format) "latex"))
          (fmt (if (symbolp fmt-raw) (symbol-name fmt-raw)
                 (format "%s" fmt-raw)))
@@ -4394,14 +4748,247 @@ If neither :section nor :types is given, all entries are included."
                                         style-str
                                         (mapconcat #'car merita--style-formatter-map ", ")))
                       merita-latex-formatter))
-         (entries (merita--org-dblock-entries types)))
+         (entries (merita--query-filter-spec spec)))
     (if (null entries)
-        (insert "%% (no entries)\n")
+        (insert (if (equal fmt "latex")
+                    "#+begin_export latex\n%% (no entries)\n#+end_export\n"
+                  "(no entries)\n"))
       (insert
        (pcase fmt
          ("plain" (merita--org-format-entries-plain entries formatter))
          (_ (merita--org-format-entries-latex entries formatter)))
        "\n"))))
+
+;;; ** 9.2. Biosketch Generator
+
+(defcustom merita-biosketch-position-title nil
+  "Default position title for `merita-biosketch'.
+When nil, the user is prompted for a position title each time."
+  :type '(choice (const :tag "Prompt every time" nil) string)
+  :group 'merita)
+
+(defcustom merita-biosketch-default-style 'nlm
+  "Citation style for biosketch publication lists.
+NLM is the NIH convention; other valid values include `vancouver',
+`apa', `ieee', `chicago', and `plain'."
+  :type 'symbol
+  :group 'merita)
+
+(defconst merita--biosketch-preamble
+  "#+TITLE: NIH Biographical Sketch — %s
+#+AUTHOR: %s
+#+OPTIONS: toc:nil num:nil author:nil date:nil title:nil
+#+LATEX_CLASS: article
+#+LATEX_CLASS_OPTIONS: [11pt,letterpaper]
+#+LATEX_HEADER: \\usepackage[T1]{fontenc}
+#+LATEX_HEADER: \\usepackage{helvet}
+#+LATEX_HEADER: \\renewcommand{\\familydefault}{\\sfdefault}
+#+LATEX_HEADER: \\usepackage[margin=0.5in]{geometry}
+#+LATEX_HEADER: \\usepackage{enumitem}
+#+LATEX_HEADER: \\usepackage{titlesec}
+#+LATEX_HEADER: \\usepackage{tabularx}
+#+LATEX_HEADER: \\usepackage{booktabs}
+#+LATEX_HEADER: \\usepackage{hyperref}
+#+LATEX_HEADER: \\usepackage{xcolor}
+#+LATEX_HEADER: \\usepackage{fancyhdr}
+#+LATEX_HEADER: \\usepackage{microtype}
+#+LATEX_HEADER:
+#+LATEX_HEADER: \\pagestyle{fancy}
+#+LATEX_HEADER: \\fancyhf{}
+#+LATEX_HEADER: \\renewcommand{\\headrulewidth}{0pt}
+#+LATEX_HEADER: \\rfoot{\\footnotesize Page \\thepage}
+#+LATEX_HEADER: \\lfoot{\\footnotesize %s}
+#+LATEX_HEADER:
+#+LATEX_HEADER: \\definecolor{linkblue}{HTML}{1a5276}
+#+LATEX_HEADER: \\hypersetup{colorlinks=true, urlcolor=linkblue, linkcolor=black}
+#+LATEX_HEADER:
+#+LATEX_HEADER: \\titleformat{\\section}{\\large\\bfseries}{\\thesection.}{0.5em}{}
+#+LATEX_HEADER: \\titlespacing*{\\section}{0pt}{1.4ex plus 0.4ex minus 0.2ex}{0.8ex}
+#+LATEX_HEADER: \\titleformat{\\subsection}{\\normalsize\\bfseries}{}{0pt}{}
+#+LATEX_HEADER: \\titlespacing*{\\subsection}{0pt}{1.0ex plus 0.2ex}{0.4ex}
+#+LATEX_HEADER:
+#+LATEX_HEADER: \\setlist[enumerate]{leftmargin=2.2em, itemsep=0.4ex, parsep=0pt, topsep=0.2ex, label=\\arabic*.}
+#+LATEX_HEADER:
+#+LATEX_HEADER: \\newcommand{\\me}[1]{\\textbf{#1}}
+#+LATEX_HEADER: \\newcommand{\\cofirst}{\\textsuperscript{\\#}}
+
+#+BEGIN_EXPORT latex
+\\noindent
+\\textbf{NAME:} %s \\\\
+\\textbf{POSITION TITLE:} %s
+#+END_EXPORT
+
+* EDUCATION/TRAINING
+
+#+BEGIN_EXPORT latex
+\\noindent\\begin{tabularx}{\\textwidth}{@{}p{5.5cm}p{1.6cm}p{2.0cm}X@{}}
+\\toprule
+INSTITUTION AND LOCATION & DEGREE & MM/YYYY & FIELD OF STUDY \\\\
+\\midrule
+%% TODO: Fill in education/training table.  Tracking of biographical
+%% entries (positions, education, appointments) is on the merita roadmap.
+ &  &  &  \\\\
+\\bottomrule
+\\end{tabularx}
+#+END_EXPORT
+"
+  "Format string for the biosketch LaTeX preamble.
+Substituted, in order, with: subject name (title), author name,
+footer name, header NAME field, POSITION TITLE field.")
+
+(defun merita--biosketch-tag-completing-read (prompt)
+  "Prompt for a tag with completion from existing tags.
+Returns the chosen tag as a string, or empty string if user enters nothing."
+  (let* ((alist (merita--collect-all-tags))
+         (choices (mapcar (lambda (c)
+                            (format "%s (%d)" (car c) (cdr c)))
+                          alist))
+         (raw (completing-read prompt choices nil nil)))
+    (downcase (string-trim
+               (if (string-match "^\\([^ ]+\\)" raw)
+                   (match-string 1 raw)
+                 raw)))))
+
+(defun merita--biosketch-prompt-groups ()
+  "Prompt for 3-5 contribution-group tags and titles.
+Returns a list of (TAG . TITLE) pairs."
+  (let ((n (string-to-number
+            (completing-read "Number of contribution groups: "
+                             '("3" "4" "5") nil t nil nil "4")))
+        (groups '()))
+    (dotimes (i n)
+      (let* ((idx (1+ i))
+             (tag (merita--biosketch-tag-completing-read
+                   (format "Group %d tag: " idx)))
+             (title (read-string
+                     (format "Group %d title: " idx))))
+        (when (and tag (not (string-empty-p tag)))
+          (push (cons tag title) groups))))
+    (nreverse groups)))
+
+(defun merita--biosketch-render-section-a (group-tags style)
+  "Render Section A (Personal Statement) using GROUP-TAGS for citation selection.
+STYLE is the citation style symbol."
+  (let ((tags-csv (string-join group-tags ",")))
+    (concat
+     "* A. Personal Statement\n\n"
+     "# TODO: Write a 3-5 sentence narrative framing your scientific trajectory,\n"
+     "# how it bears on the proposed work, and why this training opportunity is\n"
+     "# the right next step.  The four publications below illustrate the\n"
+     "# trajectory and are pulled from the union of the contribution-group tags.\n\n"
+     "** Ongoing and recently completed projects\n\n"
+     "# Pulled from active grant entries (delete this subsection if none apply).\n\n"
+     "#+BEGIN: merita :section grants :rank year :limit 5 :format latex :style plain\n"
+     "#+END:\n\n"
+     "** Citations\n\n"
+     (format "#+BEGIN: merita :tags %s :tags-any t :limit 4 :rank biosketch :style %s :format latex\n"
+             tags-csv (symbol-name style))
+     "#+END:\n\n")))
+
+(defun merita--biosketch-render-section-b ()
+  "Render Section B (Positions, Appointments, Honors)."
+  (concat
+   "* B. Positions, Scientific Appointments, and Honors\n\n"
+   "** Positions and Scientific Appointments\n\n"
+   "# TODO: List positions in reverse chronological order.  Tracking of\n"
+   "# biographical entries (positions, appointments) is on the merita roadmap;\n"
+   "# fill in manually for now.\n\n"
+   "#+BEGIN_EXPORT latex\n"
+   "\\begin{itemize}[leftmargin=*, label={}, itemsep=0.2ex]\n"
+   "  \\item YYYY--present\\quad Position, Institution, Location\n"
+   "\\end{itemize}\n"
+   "#+END_EXPORT\n\n"
+   "** Honors\n\n"
+   "#+BEGIN: merita :section awards :rank year :format latex :style plain\n"
+   "#+END:\n\n"))
+
+(defun merita--biosketch-render-contribution (idx tag title style)
+  "Render one contribution-group section.
+IDX is the 1-based group number, TAG the tag, TITLE the heading, STYLE the
+citation style."
+  (concat
+   (format "** %d. %s\n\n" idx (if (string-empty-p title)
+                                   (format "<title for tag %s>" tag)
+                                 title))
+   "# TODO: Write a paragraph describing this line of work.  Refer to the\n"
+   "# publications below by item number.\n\n"
+   (format "#+BEGIN: merita :tags %s :limit 4 :rank biosketch :style %s :format latex\n"
+           tag (symbol-name style))
+   "#+END:\n\n"))
+
+(defun merita--biosketch-render (name position groups style)
+  "Render a complete biosketch as a string.
+NAME and POSITION go into the header.  GROUPS is a list of (TAG . TITLE)
+pairs for Section C.  STYLE is the citation style symbol."
+  (let ((group-tags (mapcar #'car groups)))
+    (concat
+     (format merita--biosketch-preamble
+             name name name name position)
+     "\n"
+     (merita--biosketch-render-section-a group-tags style)
+     (merita--biosketch-render-section-b)
+     "* C. Contributions to Science\n\n"
+     (let ((idx 0))
+       (mapconcat (lambda (g)
+                    (setq idx (1+ idx))
+                    (merita--biosketch-render-contribution
+                     idx (car g) (cdr g) style))
+                  groups
+                  ""))
+     "* COMMENT Notes\n\n"
+     "After editing the prose:\n\n"
+     "1. Update all dynamic blocks: =M-x org-update-all-dblocks= (or =C-c C-x C-u=).\n"
+     "2. Export to PDF: =C-c C-e l p= (or =M-x org-latex-export-to-pdf=).\n"
+     "3. Verify against the funding agency's format requirements (font, margins,\n"
+     "   page limit).  The default preamble uses Helvetica (~Arial), 11pt,\n"
+     "   0.5\" margins, single-spaced -- consistent with NIH biosketch and most\n"
+     "   institutional pilot grant RFAs.\n")))
+
+;;;###autoload
+(defun merita-biosketch (&optional outfile)
+  "Generate an NIH-style biosketch scaffold as an Org file.
+Prompts for position title and 3-5 thematic contribution groups (each
+identified by a tag and a section title), then writes a complete Org file
+to OUTFILE with LaTeX preamble, header, education table stub, Sections A
+(Personal Statement), B (Positions/Honors), and C (Contributions to
+Science).  Each Section C contribution and the Section A representative
+publications are populated by `merita' dynamic blocks filtered on the
+chosen tags.
+
+After running this command, edit the prose where indicated by =TODO=
+markers, run =M-x org-update-all-dblocks= to populate the citation lists,
+then export to PDF via the org LaTeX exporter.  The default preamble
+targets the NIH biosketch format conventions: Helvetica (Arial-equivalent)
+11pt, 0.5\" margins, single-spaced, with a footer showing the author name
+and page number on each page."
+  (interactive)
+  (merita--ensure-db)
+  (let* ((name (or merita-user-name
+                   (read-string "Author name: ")))
+         (position (or merita-biosketch-position-title
+                       (read-string "Position title: ")))
+         (groups (merita--biosketch-prompt-groups))
+         (style (intern (completing-read
+                         (format "Citation style [%s]: "
+                                 (symbol-name merita-biosketch-default-style))
+                         (mapcar #'car merita--style-formatter-map)
+                         nil t nil nil
+                         (symbol-name merita-biosketch-default-style))))
+         (default-name (format "biosketch-%s.org"
+                               (format-time-string "%Y%m%d")))
+         (file (or outfile
+                   (read-file-name "Output file: "
+                                   (file-name-as-directory
+                                    (or merita-default-export-directory
+                                        default-directory))
+                                   nil nil default-name))))
+    (when (null groups)
+      (user-error "No contribution groups specified"))
+    (with-temp-file file
+      (insert (merita--biosketch-render name position groups style)))
+    (find-file file)
+    (message "Biosketch scaffold written to %s.  Run M-x org-update-all-dblocks to fill citation lists."
+             file)))
 
 ;;; * 10. Provide
 
